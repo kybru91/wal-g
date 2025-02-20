@@ -7,6 +7,7 @@ import (
 	"github.com/spf13/viper"
 	"github.com/wal-g/tracelog"
 	"github.com/wal-g/wal-g/internal"
+	conf "github.com/wal-g/wal-g/internal/config"
 	"github.com/wal-g/wal-g/internal/fsutil"
 )
 
@@ -30,7 +31,7 @@ func ConfigureWalUploader(baseUploader internal.Uploader) (uploader *WalUploader
 
 // TODO : unit tests
 func configureWalDeltaUsage() (useWalDelta bool, deltaDataFolder fsutil.DataFolder, err error) {
-	useWalDelta = viper.GetBool(internal.UseWalDeltaSetting)
+	useWalDelta = viper.GetBool(conf.UseWalDeltaSetting)
 	if !useWalDelta {
 		return
 	}
@@ -46,11 +47,11 @@ func configureWalDeltaUsage() (useWalDelta bool, deltaDataFolder fsutil.DataFold
 }
 
 func getStopBackupTimeoutSetting() (time.Duration, error) {
-	if !viper.IsSet(internal.PgStopBackupTimeout) {
+	if !viper.IsSet(conf.PgStopBackupTimeout) {
 		return 0, nil
 	}
 
-	timeout, err := internal.GetDurationSetting(internal.PgStopBackupTimeout)
+	timeout, err := conf.GetDurationSetting(conf.PgStopBackupTimeout)
 	if err != nil {
 		return 0, err
 	}

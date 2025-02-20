@@ -4,121 +4,27 @@ import (
 	"bufio"
 	"context"
 	"fmt"
-	"hash/fnv"
 	"io"
 	"os"
+	"path"
 	"path/filepath"
 
-	"github.com/pkg/sftp"
+	"github.com/pkg/errors"
 	"github.com/wal-g/tracelog"
 	"github.com/wal-g/wal-g/internal/contextio"
 	"github.com/wal-g/wal-g/pkg/storages/storage"
-	"golang.org/x/crypto/ssh"
 )
 
+// TODO: Unit tests
 type Folder struct {
-	client SftpClient
-	host   string
-	path   string
-	user   string
+	sftpLazy *SFTPLazy
+	path     string
 }
 
-const (
-	Port              = "SSH_PORT"
-	Password          = "SSH_PASSWORD"
-	Username          = "SSH_USERNAME"
-	PrivateKeyPath    = "SSH_PRIVATE_KEY_PATH"
-	defaultBufferSize = 64 * 1024 * 1024
-)
-
-var SettingsList = []string{
-	Port,
-	Password,
-	Username,
-	PrivateKeyPath,
-}
-
-func NewFolderError(err error, format string, args ...interface{}) storage.Error {
-	return storage.NewError(err, "SSH", format, args...)
-}
-
-func ConfigureFolder(prefix string, settings map[string]string) (storage.HashableFolder, error) {
-	host, path, err := storage.ParsePrefixAsURL(prefix)
-
-	if err != nil {
-		return nil, err
-	}
-
-	user := settings[Username]
-	pass := settings[Password]
-	port := settings[Port]
-	pkeyPath := settings[PrivateKeyPath]
-
-	if port == "" {
-		port = "22"
-	}
-
-	authMethods := []ssh.AuthMethod{}
-	if pkeyPath != "" {
-		pkey, err := os.ReadFile(pkeyPath)
-		if err != nil {
-			return nil, NewFolderError(err, "Unable to read private key: %v", err)
-		}
-
-		signer, err := ssh.ParsePrivateKey(pkey)
-		if err != nil {
-			return nil, NewFolderError(err, "Unable to parse private key: %v", err)
-		}
-
-		authMethods = append(authMethods, ssh.PublicKeys(signer))
-	}
-
-	if pass != "" {
-		authMethods = append(authMethods, ssh.Password(pass))
-	}
-
-	config := &ssh.ClientConfig{
-		User:            user,
-		Auth:            authMethods,
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
-	}
-
-	address := fmt.Sprint(host, ":", port)
-	sshClient, err := ssh.Dial("tcp", address, config)
-	if err != nil {
-		return nil, NewFolderError(err, "Fail connect via ssh. Address: %s", address)
-	}
-
-	sftpClient, err := sftp.NewClient(sshClient)
-	if err != nil {
-		return nil, NewFolderError(err, "Fail connect via sftp. Address: %s", address)
-	}
-
-	path = storage.AddDelimiterToPath(path)
-
-	return NewFolder(
-		extend(sftpClient),
-		host,
-		path,
-		user,
-	), nil
-}
-
-func NewFolder(client SftpClient, host, path, user string) *Folder {
+func NewFolder(sftpLazy *SFTPLazy, path string) *Folder {
 	return &Folder{
-		client: client,
-		host:   host,
-		path:   path,
-		user:   user,
-	}
-}
-
-// TODO close ssh and sftp connection
-// nolint: unused
-func closeConnection(client io.Closer) {
-	err := client.Close()
-	if err != nil {
-		tracelog.WarningLogger.FatalOnError(err)
+		sftpLazy: sftpLazy,
+		path:     path,
 	}
 }
 
@@ -127,27 +33,27 @@ func (folder *Folder) GetPath() string {
 }
 
 func (folder *Folder) ListFolder() (objects []storage.Object, subFolders []storage.Folder, err error) {
-	client := folder.client
-	path := folder.path
+	client, err := folder.sftpLazy.Client()
+	if err != nil {
+		return nil, nil, err
+	}
 
 	filesInfo, err := client.ReadDir(folder.path)
 
 	if os.IsNotExist(err) {
-		// Folder does not exists, it means where are no objects in folder
-		tracelog.InfoLogger.Println("\tskipped " + folder.path + ": " + err.Error())
-		err = nil
-		return
+		// The folder does not exist, it means there are no objects in it
+		tracelog.DebugLogger.Println("\tnonexistent skipped " + folder.path + ": " + err.Error())
+		return nil, nil, nil
 	}
 
 	if err != nil {
-		return nil, nil,
-			NewFolderError(err, "Fail read folder '%s'", path)
+		return nil, nil, fmt.Errorf("read SFTP folder %q: %w", folder.path, err)
 	}
 
 	for _, fileInfo := range filesInfo {
 		if fileInfo.IsDir() {
-			folder := NewFolder(folder.client, folder.host, client.Join(path, fileInfo.Name()), folder.user)
-			subFolders = append(subFolders, folder)
+			subFolder := NewFolder(folder.sftpLazy, client.Join(folder.path, fileInfo.Name()))
+			subFolders = append(subFolders, subFolder)
 			// Folder is not object, just skip it
 			continue
 		}
@@ -164,14 +70,21 @@ func (folder *Folder) ListFolder() (objects []storage.Object, subFolders []stora
 }
 
 func (folder *Folder) DeleteObjects(objectRelativePaths []string) error {
-	client := folder.client
+	client, err := folder.sftpLazy.Client()
+	if err != nil {
+		return err
+	}
 
 	for _, relativePath := range objectRelativePaths {
-		path := client.Join(folder.path, relativePath)
+		objPath := client.Join(folder.path, relativePath)
 
-		stat, err := client.Stat(path)
+		stat, err := client.Stat(objPath)
+		if errors.Is(err, os.ErrNotExist) {
+			// Don't throw error if the file doesn't exist, to follow the storage.Folder contract
+			continue
+		}
 		if err != nil {
-			return NewFolderError(err, "Fail to get object stat '%s': %v", path, err)
+			return fmt.Errorf("get stats of object %q via SFTP: %w", objPath, err)
 		}
 
 		// Do not try to remove directory. It may be not empty. TODO: remove if empty
@@ -179,9 +92,13 @@ func (folder *Folder) DeleteObjects(objectRelativePaths []string) error {
 			continue
 		}
 
-		err = client.Remove(path)
+		err = client.Remove(objPath)
+		if errors.Is(err, os.ErrNotExist) {
+			// Don't throw error if the file doesn't exist, to follow the storage.Folder contract
+			continue
+		}
 		if err != nil {
-			return NewFolderError(err, "Fail delete object '%s': %v", path, err)
+			return fmt.Errorf("delete object %q via SFTP: %w", objPath, err)
 		}
 	}
 
@@ -189,37 +106,41 @@ func (folder *Folder) DeleteObjects(objectRelativePaths []string) error {
 }
 
 func (folder *Folder) Exists(objectRelativePath string) (bool, error) {
-	path := filepath.Join(folder.path, objectRelativePath)
-	_, err := folder.client.Stat(path)
+	client, err := folder.sftpLazy.Client()
+	if err != nil {
+		return false, err
+	}
+
+	objPath := filepath.Join(folder.path, objectRelativePath)
+	_, err = client.Stat(objPath)
 
 	if os.IsNotExist(err) {
 		return false, nil
 	}
 
 	if err != nil {
-		return false, NewFolderError(
-			err, "Fail check object existence '%s'", path,
-		)
+		return false, fmt.Errorf("check file %q existence via SFTP: %w", objPath, err)
 	}
 
 	return true, nil
 }
 
 func (folder *Folder) GetSubFolder(subFolderRelativePath string) storage.Folder {
-	return NewFolder(
-		folder.client,
-		folder.host,
-		folder.client.Join(folder.path, subFolderRelativePath),
-		folder.user,
-	)
+	return NewFolder(folder.sftpLazy, path.Join(folder.path, subFolderRelativePath))
 }
 
-func (folder *Folder) ReadObject(objectRelativePath string) (io.ReadCloser, error) {
-	path := folder.client.Join(folder.path, objectRelativePath)
-	file, err := folder.client.OpenFile(path)
+const defaultBufferSize = 64 * 1024 * 1024
 
+func (folder *Folder) ReadObject(objectRelativePath string) (io.ReadCloser, error) {
+	client, err := folder.sftpLazy.Client()
 	if err != nil {
-		return nil, storage.NewObjectNotFoundError(path)
+		return nil, err
+	}
+
+	objPath := path.Join(folder.path, objectRelativePath)
+	file, err := client.Open(objPath)
+	if err != nil {
+		return nil, storage.NewObjectNotFoundError(objPath)
 	}
 
 	return struct {
@@ -229,24 +150,22 @@ func (folder *Folder) ReadObject(objectRelativePath string) (io.ReadCloser, erro
 }
 
 func (folder *Folder) PutObject(name string, content io.Reader) error {
-	client := folder.client
+	client, err := folder.sftpLazy.Client()
+	if err != nil {
+		return err
+	}
+
 	absolutePath := filepath.Join(folder.path, name)
 
 	dirPath := filepath.Dir(absolutePath)
-	err := client.Mkdir(dirPath)
+	err = client.MkdirAll(dirPath)
 	if err != nil {
-		return NewFolderError(
-			err, "Fail to create directory '%s'",
-			dirPath,
-		)
+		return fmt.Errorf("create directory %q via SFTP: %w", dirPath, err)
 	}
 
-	file, err := client.CreateFile(absolutePath)
+	file, err := client.Create(absolutePath)
 	if err != nil {
-		return NewFolderError(
-			err, "Fail to create file '%s'",
-			absolutePath,
-		)
+		return fmt.Errorf("create file %q via SFTP: %w", absolutePath, err)
 	}
 
 	_, err = io.Copy(file, content)
@@ -255,17 +174,11 @@ func (folder *Folder) PutObject(name string, content io.Reader) error {
 		if closerErr != nil {
 			tracelog.InfoLogger.Println("Error during closing failed upload ", closerErr)
 		}
-		return NewFolderError(
-			err, "Fail write content to file '%s'",
-			absolutePath,
-		)
+		return fmt.Errorf("write data to file %q via SFTP: %w", absolutePath, err)
 	}
 	err = file.Close()
 	if err != nil {
-		return NewFolderError(
-			err, "Fail write close file '%s'",
-			absolutePath,
-		)
+		return fmt.Errorf("close file %q opened via SFTP: %w", absolutePath, err)
 	}
 	return nil
 }
@@ -280,34 +193,22 @@ func (folder *Folder) CopyObject(srcPath string, dstPath string) error {
 		if err == nil {
 			return storage.NewObjectNotFoundError(srcPath)
 		}
-		return err
+		return fmt.Errorf("copy via SFTP: check if source file %q exists: %w", srcPath, err)
 	}
 	file, err := folder.ReadObject(srcPath)
 	if err != nil {
-		return err
+		return fmt.Errorf("copy via SFTP: read source file %q: %w", srcPath, err)
 	}
 	err = folder.PutObject(dstPath, file)
 	if err != nil {
-		return err
+		return fmt.Errorf("copy via SFTP: write destination file %q: %w", dstPath, err)
 	}
 	return nil
 }
 
-func (folder *Folder) Hash() storage.Hash {
-	hash := fnv.New64a()
-
-	addToHash := func(data []byte) {
-		_, err := hash.Write(data)
-		if err != nil {
-			// Writing to the hash function is always successful, so it mustn't be a problem that we panic here
-			panic(err)
-		}
-	}
-
-	addToHash([]byte("sh"))
-	addToHash([]byte(folder.host))
-	addToHash([]byte(folder.path))
-	addToHash([]byte(folder.user))
-
-	return storage.Hash(hash.Sum64())
+func (folder *Folder) Validate() error {
+	return nil
 }
+
+// NOT IMPLEMENTED
+func (folder *Folder) SetVersioningEnabled(enable bool) {}

@@ -9,6 +9,8 @@ import (
 	"github.com/spf13/viper"
 	"github.com/wal-g/tracelog"
 	"github.com/wal-g/wal-g/internal"
+	conf "github.com/wal-g/wal-g/internal/config"
+	"github.com/wal-g/wal-g/internal/multistorage/policies"
 )
 
 const (
@@ -17,7 +19,7 @@ const (
 	restorePointDescription      = "Fetch storage backup w/ restore point specified by name"
 	restorePointTSDescription    = "Fetch storage backup w/ restore point time less or equal to the provided timestamp"
 	restoreConfigPathDescription = "Path to the cluster restore configuration"
-	fetchContentIdsDescription   = "If set, WAL-G will fetch only the specified segments"
+	fetchContentIDsDescription   = "If set, WAL-G will fetch only the specified segments"
 	fetchModeDescription         = "Backup fetch mode. default: do the backup unpacking " +
 		"and prepare the configs [unpack+prepare], unpack: backup unpacking only, prepare: config preparation only."
 	inPlaceFlagDescription = "Perform the backup fetch in-place (without the restore config)"
@@ -29,7 +31,7 @@ var fetchTargetUserData string
 var restorePointTS string
 var restorePoint string
 var restoreConfigPath string
-var fetchContentIds *[]int
+var fetchContentIDs *[]int
 var fetchModeStr string
 var inPlaceRestore bool
 var partialRestoreArgs []string
@@ -47,10 +49,10 @@ var backupFetchCmd = &cobra.Command{
 		}
 
 		if fetchTargetUserData == "" {
-			fetchTargetUserData = viper.GetString(internal.FetchTargetUserDataSetting)
+			fetchTargetUserData = viper.GetString(conf.FetchTargetUserDataSetting)
 		}
 
-		folder, err := internal.ConfigureFolder()
+		rootFolder, err := getMultistorageRootFolder(false, policies.UniteAllStorages)
 		tracelog.ErrorLogger.FatalOnError(err)
 
 		if restorePoint != "" && restorePointTS != "" {
@@ -58,24 +60,26 @@ var backupFetchCmd = &cobra.Command{
 		}
 
 		if restorePointTS != "" {
-			restorePoint, err = greenplum.FindRestorePointBeforeTS(restorePointTS, folder)
+			restorePoints, err := greenplum.FetchAllRestorePoints(rootFolder)
+			tracelog.ErrorLogger.FatalOnError(err)
+			restorePoint, err = greenplum.FindRestorePointBeforeTS(restorePointTS, restorePoints)
 			tracelog.ErrorLogger.FatalOnError(err)
 		}
 
 		targetBackupSelector, err := createTargetFetchBackupSelector(cmd, args, fetchTargetUserData, restorePoint)
 		tracelog.ErrorLogger.FatalOnError(err)
 
-		logsDir := viper.GetString(internal.GPLogsDirectory)
+		logsDir := viper.GetString(conf.GPLogsDirectory)
 
-		if len(*fetchContentIds) > 0 {
-			tracelog.InfoLogger.Printf("Will perform fetch operations only on the specified segments: %v", *fetchContentIds)
+		if len(*fetchContentIDs) > 0 {
+			tracelog.InfoLogger.Printf("Will perform fetch operations only on the specified segments: %v", *fetchContentIDs)
 		}
 
 		fetchMode, err := greenplum.NewBackupFetchMode(fetchModeStr)
 		tracelog.ErrorLogger.FatalOnError(err)
 
-		internal.HandleBackupFetch(folder, targetBackupSelector,
-			greenplum.NewGreenplumBackupFetcher(restoreConfigPath, inPlaceRestore, logsDir, *fetchContentIds, fetchMode, restorePoint,
+		internal.HandleBackupFetch(rootFolder, targetBackupSelector,
+			greenplum.NewGreenplumBackupFetcher(restoreConfigPath, inPlaceRestore, logsDir, *fetchContentIDs, fetchMode, restorePoint,
 				partialRestoreArgs))
 	},
 }
@@ -112,7 +116,7 @@ func init() {
 	backupFetchCmd.Flags().StringVar(&restoreConfigPath, "restore-config",
 		"", restoreConfigPathDescription)
 	backupFetchCmd.Flags().BoolVar(&inPlaceRestore, "in-place", false, inPlaceFlagDescription)
-	fetchContentIds = backupFetchCmd.Flags().IntSlice("content-ids", []int{}, fetchContentIdsDescription)
+	fetchContentIDs = backupFetchCmd.Flags().IntSlice("content-ids", []int{}, fetchContentIDsDescription)
 	backupFetchCmd.Flags().StringSliceVar(&partialRestoreArgs, "restore-only", nil, restoreOnlyDescription)
 
 	backupFetchCmd.Flags().StringVar(&fetchModeStr, "mode", "default", fetchModeDescription)

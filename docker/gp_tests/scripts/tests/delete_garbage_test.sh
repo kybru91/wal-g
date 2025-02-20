@@ -10,31 +10,28 @@ cat ${COMMON_CONFIG} >> ${TMP_CONFIG}
 source /tmp/tests/test_functions/util.sh
 
 bootstrap_gp_cluster
-sleep 3
 setup_wal_archiving
 enable_pitr_extension
 
 wal-g --config=${TMP_CONFIG} delete everything FORCE --confirm
 
 insert_data
-sleep 1
 wal-g --config=${TMP_CONFIG} backup-push --permanent
 
 PERMANENT_BACKUP=$(wal-g --config=${TMP_CONFIG} backup-list | awk 'NR==2{print $1}')
 
 # add some WALs
 insert_a_lot_of_data
-sleep 1
 
-# make two non-permanent backups
-for _ in 1 2
+# make three non-permanent backups
+for _ in 1 2 3
 do
     insert_data
-    sleep 1
     wal-g --config=${TMP_CONFIG} backup-push
 done
 
 FIRST_NON_PERMANENT_BACKUP=$(wal-g --config=${TMP_CONFIG} backup-list | awk 'NR==3{print $1}')
+EXPECTED_OLDEST_NON_PERMANENT_BACKUP=$(wal-g --config=${TMP_CONFIG} backup-list | awk 'NR==4{print $1}')
 
 # backup the first non-permanent backup sentinel and remove it from the storage
 # to emulate some partially deleted backup
@@ -74,10 +71,17 @@ then
     exit 1
 fi
 
+ACTUAL_OLDEST_NON_PERMANENT_BACKUP=$(wal-g --config=${TMP_CONFIG} backup-list | awk 'NR==3{print $1}')
+
+if [ "$EXPECTED_OLDEST_NON_PERMANENT_BACKUP" != "$ACTUAL_OLDEST_NON_PERMANENT_BACKUP" ];
+then
+    echo "oh no! delete garbage deleted some backups that should have stayed!"
+    exit 1
+fi
+
 # try to restore the permanent backup
 stop_and_delete_cluster_dir
 
-sleep 1
 # should successfully restore the second delta chain
 wal-g backup-fetch $PERMANENT_BACKUP --in-place --config=${TMP_CONFIG}
 start_cluster

@@ -1,7 +1,9 @@
 package postgres
 
 import (
-	"github.com/jackc/pgx"
+	"context"
+
+	"github.com/jackc/pgx/v5"
 	"github.com/pkg/errors"
 	"github.com/wal-g/tracelog"
 )
@@ -13,18 +15,20 @@ import (
 //
 // Example: PGHOST=/var/run/postgresql or PGHOST=10.0.0.1
 func Connect(configOptions ...func(config *pgx.ConnConfig) error) (*pgx.Conn, error) {
-	config, err := pgx.ParseEnvLibpq()
+	config, err := pgx.ParseConfig("")
 	if err != nil {
 		return nil, errors.Wrap(err, "Connect: unable to read environment variables")
 	}
+
 	// apply passed custom config options, if any
 	for _, option := range configOptions {
-		err := option(&config)
+		err := option(config)
 		if err != nil {
 			return nil, err
 		}
 	}
-	conn, err := pgx.Connect(config)
+
+	conn, err := pgx.ConnectConfig(context.TODO(), config)
 	if err != nil {
 		conn, err = tryConnectToGpSegment(config)
 
@@ -33,7 +37,7 @@ func Connect(configOptions ...func(config *pgx.ConnConfig) error) (*pgx.Conn, er
 			tracelog.ErrorLogger.Println("Failed to connect using provided PGHOST and PGPORT, trying localhost:5432")
 			config.Host = "localhost"
 			config.Port = 5432
-			conn, err = pgx.Connect(config)
+			conn, err = pgx.ConnectConfig(context.TODO(), config)
 		}
 
 		if err != nil {
@@ -41,13 +45,35 @@ func Connect(configOptions ...func(config *pgx.ConnConfig) error) (*pgx.Conn, er
 		}
 	}
 
+	err = checkArchiveCommand(conn)
+	if err != nil {
+		return nil, err
+	}
+
+	return conn, nil
+}
+
+func checkArchiveCommand(conn *pgx.Conn) error {
+	// TODO: Move this logic to queryRunner
+
+	var standby bool
+
+	err := conn.QueryRow(context.TODO(), "select pg_is_in_recovery()").Scan(&standby)
+	if err != nil {
+		return errors.Wrap(err, "Connect: postgres standby test failed")
+	}
+
+	if standby {
+		// archive_mode may be configured on primary
+		return nil
+	}
+
 	var archiveMode string
 
-	// TODO: Move this logic to queryRunner
-	err = conn.QueryRow("show archive_mode").Scan(&archiveMode)
+	err = conn.QueryRow(context.TODO(), "show archive_mode").Scan(&archiveMode)
 
 	if err != nil {
-		return nil, errors.Wrap(err, "Connect: postgres archive_mode test failed")
+		return errors.Wrap(err, "Connect: postgres archive_mode test failed")
 	}
 
 	if archiveMode != "on" && archiveMode != "always" {
@@ -57,10 +83,10 @@ func Connect(configOptions ...func(config *pgx.ConnConfig) error) (*pgx.Conn, er
 	} else {
 		var archiveCommand string
 
-		err = conn.QueryRow("show archive_command").Scan(&archiveCommand)
+		err = conn.QueryRow(context.TODO(), "show archive_command").Scan(&archiveCommand)
 
 		if err != nil {
-			return nil, errors.Wrap(err, "Connect: postgres archive_mode test failed")
+			return errors.Wrap(err, "Connect: postgres archive_mode test failed")
 		}
 
 		if len(archiveCommand) == 0 || archiveCommand == "(disabled)" {
@@ -69,18 +95,17 @@ func Connect(configOptions ...func(config *pgx.ConnConfig) error) (*pgx.Conn, er
 					" Please consider configuring WAL archiving.")
 		}
 	}
-
-	return conn, nil
+	return nil
 }
 
 // nolint:gocritic
-func tryConnectToGpSegment(config pgx.ConnConfig) (*pgx.Conn, error) {
+func tryConnectToGpSegment(config *pgx.ConnConfig) (*pgx.Conn, error) {
 	config.RuntimeParams["gp_role"] = "utility"
-	conn, err := pgx.Connect(config)
+	conn, err := pgx.ConnectConfig(context.TODO(), config)
 
 	if err != nil {
 		config.RuntimeParams["gp_session_role"] = "utility"
-		conn, err = pgx.Connect(config)
+		conn, err = pgx.ConnectConfig(context.TODO(), config)
 	}
 	return conn, err
 }

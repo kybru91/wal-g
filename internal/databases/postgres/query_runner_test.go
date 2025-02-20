@@ -1,6 +1,7 @@
 package postgres_test
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/wal-g/wal-g/internal/databases/postgres"
@@ -60,4 +61,23 @@ func TestBuildStopBackup(t *testing.T) {
 	queryBuilder.Version = 150000
 	queryString, err = queryBuilder.BuildStopBackup()
 	assert.Equal(t, "SELECT labelfile, spcmapfile, lsn FROM pg_backup_stop(false)", queryString)
+}
+
+func TestIsTablespaceMapExists(t *testing.T) {
+	testCases := []struct {
+		version  int
+		expected bool
+	}{
+		{0, false},
+		{90600, true},
+		{int((^uint(0)) >> 1), true},
+	}
+
+	for _, tc := range testCases {
+		t.Run(fmt.Sprintf("TestIsTablespaceMapExists_PgVersion_%d", tc.version), func(t *testing.T) {
+			queryBuilder := &postgres.PgQueryRunner{Version: tc.version}
+			isTablespaceMapExists := queryBuilder.IsTablespaceMapExists()
+			assert.Equal(t, isTablespaceMapExists, tc.expected)
+		})
+	}
 }

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/wal-g/tracelog"
+
 	"github.com/wal-g/wal-g/internal"
 	"github.com/wal-g/wal-g/internal/printlist"
 	"github.com/wal-g/wal-g/pkg/storages/storage"
@@ -23,6 +24,7 @@ func NewBackupDetail(backup Backup) BackupDetail {
 		DatetimeFormat:    backup.SentinelDto.DatetimeFormat,
 		Hostname:          backup.SentinelDto.Hostname,
 		GpVersion:         backup.SentinelDto.GpVersion,
+		GpFlavor:          backup.SentinelDto.GpFlavor,
 		IsPermanent:       backup.SentinelDto.IsPermanent,
 		SystemIdentifier:  backup.SentinelDto.SystemIdentifier,
 		UncompressedSize:  backup.SentinelDto.UncompressedSize,
@@ -44,6 +46,7 @@ type BackupDetail struct {
 	DatetimeFormat   string    `json:"date_fmt,omitempty"`
 	Hostname         string    `json:"hostname"`
 	GpVersion        string    `json:"gp_version"`
+	GpFlavor         Flavor    `json:"gp_flavor"`
 	IsPermanent      bool      `json:"is_permanent"`
 	SystemIdentifier *uint64   `json:"system_identifier,omitempty"`
 
@@ -113,7 +116,7 @@ func ListStorageBackups(folder storage.Folder) ([]Backup, error) {
 
 	backups := make([]Backup, 0, len(backupObjects))
 	for _, b := range backupObjects {
-		backup, err := NewBackup(folder, b.BackupName)
+		backup, err := NewBackupInStorage(folder, b.BackupName, b.StorageName)
 		if err != nil {
 			return nil, err
 		}

@@ -1,13 +1,21 @@
-version: '3'
-
 volumes:
   fdb_volume:
 
 x-s3_common_depends: &s3_common_depends
   depends_on:
     - s3
+    # - graphite
   links:
     - s3
+    # - graphite
+
+x-s3_throttling_depends: &s3_throttling_depends
+  depends_on:
+    - s3-for-throttling
+    # - graphite
+  links:
+    - s3-for-throttling
+    # - graphite
 
 services:
   golang:
@@ -21,8 +29,15 @@ services:
     build:
       dockerfile: ./docker/ubuntu/Dockerfile
       context: .
-    image: wal-g/ubuntu
+    image: wal-g/ubuntu:18.04
     container_name: wal-g_ubuntu
+
+  ubuntu_20_04:
+    build:
+      dockerfile: ./docker/ubuntu/Dockerfile_20_04
+      context: .
+    image: wal-g/ubuntu:20.04
+    container_name: wal-g_ubuntu_20_04
 
   swift:
     image: openstackswift/saio:change_890691_py3 # "version": "2.32.0.dev213"
@@ -30,6 +45,22 @@ services:
     hostname: swift
     ports:
       - "8010:8080"
+
+  # "WALG_STATSD_ADDRESS": "wal-g_graphite:8125"
+  graphite:
+    image: hopsoft/graphite-statsd
+    hostname: wal-g_graphite
+    container_name: wal-g_graphite
+    ports:
+      - "8125:8125"
+      - "8126:8126"
+      - "2003:2003"
+      - "2023:2023"
+      - "2004:2004"
+      - "2024:2024"
+      - "80:80"
+      - "81:81"
+      - "3000:3000"
 
   s3:
     image: minio/minio:RELEASE.2021-06-07T21-40-51Z
@@ -56,35 +87,57 @@ services:
       &&  mkdir -p /export/waldeltabucket
       &&  mkdir -p /export/ghostbucket
       &&  mkdir -p /export/compressionbucket
+      &&  mkdir -p /export/deleteretainafterbucket
       &&  mkdir -p /export/copyallbucket
       &&  mkdir -p /export/copybackupbucket
       &&  mkdir -p /export/compressionreversebucket
-      &&  mkdir -p /export/deleteretainfullbucket
-      &&  mkdir -p /export/deleteretainfindfullbucket
-      &&  mkdir -p /export/deletebeforenamefindfullbucket
-      &&  mkdir -p /export/deletebeforetimefindfullbucket
-      &&  mkdir -p /export/deletebeforepermanentfullbucket
-      &&  mkdir -p /export/deletebeforepermanentdeltabucket
-      &&  mkdir -p /export/deletewithoutconfirm
-      &&  mkdir -p /export/deleteendtoendbucket
-      &&  mkdir -p /export/deletetargetbucket
+      &&  mkdir -p /export/delete-retain-full-bucket
+      &&  mkdir -p /export/delete-retain-full-multist-bucket
+      &&  mkdir -p /export/delete-retain-full-multist-fo-bucket
+      &&  mkdir -p /export/delete-retain-find-full-bucket
+      &&  mkdir -p /export/delete-before-name-find-full-bucket
+      &&  mkdir -p /export/delete-before-time-find-full-bucket
+      &&  mkdir -p /export/delete-before-permanent-full-bucket
+      &&  mkdir -p /export/delete-before-permanent-delta-bucket
+      &&  mkdir -p /export/delete-before-permanent-delta-multist-bucket
+      &&  mkdir -p /export/delete-before-permanent-delta-multist-fo-bucket
+      &&  mkdir -p /export/delete-without-confirm-bucket
+      &&  mkdir -p /export/delete-end-to-end-bucket
+      &&  mkdir -p /export/delete-end-to-end-fo-bucket
+      &&  mkdir -p /export/delete-target-bucket
+      &&  mkdir -p /export/delete-target-delta-find-full-bucket
+      &&  mkdir -p /export/delete-target-delta-bucket
+      &&  mkdir -p /export/delete-target-delta-multist-bucket
+      &&  mkdir -p /export/delete-target-delta-multist-fo-bucket
+      &&  mkdir -p /export/delete-garbage-bucket
+      &&  mkdir -p /export/delete-garbage-multist-bucket
+      &&  mkdir -p /export/delete-garbage-multist-fo-bucket
       &&  mkdir -p /export/gpdeletetargetbucket
-      &&  mkdir -p /export/deletegarbagebucket
       &&  mkdir -p /export/gpdeletegarbagebucket
+      &&  mkdir -p /export/cloudberry-delete-target-bucket
+      &&  mkdir -p /export/cloudberry-delete-garbage-bucket
       &&  mkdir -p /export/mysqlfullxtrabackupbucket
+      &&  mkdir -p /export/mysqlincrementalxtrabackupbucket
       &&  mkdir -p /export/mysqlsplitfilesizebucket
       &&  mkdir -p /export/mysqlfullxtrabackupwithrangesbucket
       &&  mkdir -p /export/mysqlfullmysqldumpbucket
       &&  mkdir -p /export/mysqlbinlogpushfetchbucket
       &&  mkdir -p /export/mysqldeleteendtoendbucket
       &&  mkdir -p /export/mysqldeleteeverythingpermanent
+      &&  mkdir -p /export/mysqldeleteincrementalxtrabackupbucket
       &&  mkdir -p /export/mysqlmarkbucket
+      &&  mkdir -p /export/mysqlmarknoerrorbucket
+      &&  mkdir -p /export/mysqlmarkincrementalbucket
       &&  mkdir -p /export/mysqlbinlogreplaybucket
       &&  mkdir -p /export/mysql_pitr_binlogserver_bucket
       &&  mkdir -p /export/mysqlpitrxtrabackupbucket
       &&  mkdir -p /export/mysqlpitrmysqldumpbucket
       &&  mkdir -p /export/mysqllivereplay
       &&  mkdir -p /export/mysqlpermanentbackupbucket
+      &&  mkdir -p /export/mysql_journal_test_bucket
+      &&  mkdir -p /export/mysql8_xbtool_bucket
+      &&  mkdir -p /export/mysql8_xbtool_incremental_bucket
+      &&  mkdir -p /export/mysql8_xbtool_inplace_bucket
       &&  mkdir -p /export/mariadb_binlog_push_fetch
       &&  mkdir -p /export/mariadb_binlog_push_with_gtids_check
       &&  mkdir -p /export/mariadb_full_mysqldump
@@ -101,17 +154,25 @@ services:
       &&  mkdir -p /export/mysqldeletebinlogs
       &&  mkdir -p /export/archivereadyrename
       &&  mkdir -p /export/gpfullbucket
-      &&  mkdir -p /export/gpfullserializedbucket
+      &&  mkdir -p /export/gpafterfailedbucket
       &&  mkdir -p /export/gpdeletewithoutconfirm
       &&  mkdir -p /export/gpdeleteretainbucket
-      &&  mkdir -p /export/gpdeleteendtoendbucket
       &&  mkdir -p /export/gpdeletebeforepermanentbucket
       &&  mkdir -p /export/gpdeletebeforenamebucket
       &&  mkdir -p /export/gpdeletebeforetimebucket
       &&  mkdir -p /export/gpaostoragetestbucket
       &&  mkdir -p /export/gpdeltabackuptestbucket
-      &&  mkdir -p /export/gppartialdatabasebucket
       &&  mkdir -p /export/gppartialtablebucket
+      &&  mkdir -p /export/cloudberry-full-bucket
+      &&  mkdir -p /export/cloudberry-after-failed-bucket
+      &&  mkdir -p /export/cloudberry-delete-without-confirm
+      &&  mkdir -p /export/cloudberry-delete-retain-bucket
+      &&  mkdir -p /export/cloudberry-delete-before-permanent-bucket
+      &&  mkdir -p /export/cloudberry-delete-before-name-bucket
+      &&  mkdir -p /export/cloudberry-delete-before-time-bucket
+      &&  mkdir -p /export/cloudberry-aostorage-test-bucket
+      &&  mkdir -p /export/cloudberry-delta-backup-test-bucket
+      &&  mkdir -p /export/cloudberry-partial-table-bucket
       &&  mkdir -p /export/createrestorepointbucket
       &&  mkdir -p /export/storagetoolsbucket
       &&  mkdir -p /export/storagetoolsbucket_target
@@ -125,12 +186,13 @@ services:
       &&  mkdir -p /export/backupmarkpermanentbucket
       &&  mkdir -p /export/backupperftestbucket
       &&  mkdir -p /export/catchupbucket
-      &&  mkdir -p /export/deletetargetdeltafindfullbucket
-      &&  mkdir -p /export/deletetargetdeltabucket
       &&  mkdir -p /export/fullstreamedbucket
       &&  mkdir -p /export/receivewalbucket
       &&  mkdir -p /export/severaldeltabackupsbucket
       &&  mkdir -p /export/walperftestbucket
+      &&  mkdir -p /export/orioledb_compatibility
+      &&  mkdir -p /export/orioledb_simple
+      &&  mkdir -p /export/orioledb_compressed
       &&  /usr/bin/minio server /export'
 
   s3-another:
@@ -145,6 +207,23 @@ services:
     command: >
       -c 'mkdir -p /export/mysqlcopybackupto
       &&  /usr/bin/minio server /export'
+
+  s3-for-throttling:
+    image: minio/minio:RELEASE.2024-01-18T22-51-28Z
+    container_name: wal-g_s3_3
+    hostname: s3
+    ports:
+      - "9000:9000"
+      - "9090:9090"
+    environment:
+      - "MINIO_ROOT_USER=AKIAIOSFODNN7EXAMPLE"
+      - "MINIO_ROOT_PASSWORD=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+      - "MINIO_API_REQUESTS_MAX=0"
+      - "MINIO_API_REQUESTS_DEADLINE=0s"
+    entrypoint: sh
+    command: >
+      -c 'mkdir -p /export/walperftestbucket
+      &&  minio server /export --console-address ":9090"'
 
   ssh:
     build:
@@ -173,6 +252,11 @@ services:
     image: wal-g/docker_prefix
     user: postgres
     <<: *s3_common_depends
+
+  pg_test_throttling: &pg_test_throttling
+    image: wal-g/docker_prefix
+    user: postgres
+    <<: *s3_throttling_depends
 
   pg_tests:
     <<: *pg_test_common
@@ -234,10 +318,20 @@ services:
     container_name: wal-g_pg_delete_before_permanent_delta_test
     command: /tmp/tests/delete_before_permanent_delta_test.sh
 
+  pg_delete_before_permanent_delta_multist_test:
+    <<: *pg_test_common
+    container_name: wal-g_pg_delete_before_permanent_delta_multist_test
+    command: /tmp/tests/delete_before_permanent_delta_multist_test.sh
+
   pg_wal_perftest:
     <<: *pg_test_common
     container_name: wal-g_pg_wal_perftest
     command: /tmp/tests/wal_perftest.sh
+
+  pg_wal_perftest_with_throttling:
+    <<: *pg_test_throttling
+    container_name: wal-g_pg_wal_perftest_with_throttling
+    command: /tmp/tests/wal_perftest_with_throttling.sh
 
   pg_backup_perftest:
     <<: *pg_test_common
@@ -253,6 +347,16 @@ services:
     <<: *pg_test_common
     container_name: wal-g_pg_delete_retain_full_test
     command: /tmp/tests/delete_retain_full_test.sh
+
+  pg_delete_retain_full_multist_test:
+    <<: *pg_test_common
+    container_name: wal-g_pg_delete_retain_full_multist_test
+    command: /tmp/tests/delete_retain_full_multist_test.sh
+
+  pg_delete_retain_after_test:
+    <<: *pg_test_common
+    container_name: wal-g_pg_delete_retain_after_test
+    command: /tmp/tests/delete_retain_after_test.sh
 
   pg_full_backup_test:
     <<: *pg_test_common
@@ -334,6 +438,11 @@ services:
     container_name: wal-g_pg_delete_garbage_test
     command: /tmp/tests/delete_garbage_test.sh
 
+  pg_delete_garbage_multist_test:
+    <<: *pg_test_common
+    container_name: wal-g_pg_delete_garbage_multist_test
+    command: /tmp/tests/delete_garbage_multist_test.sh
+
   pg_delete_target_test:
     <<: *pg_test_common
     container_name: wal-g_pg_delete_target_test
@@ -343,6 +452,11 @@ services:
     <<: *pg_test_common
     container_name: wal-g_pg_delete_target_delta_test
     command: /tmp/tests/delete_target_delta_test.sh
+
+  pg_delete_target_delta_multist_test:
+    <<: *pg_test_common
+    container_name: wal-g_pg_delete_target_delta_multist_test
+    command: /tmp/tests/delete_target_delta_multist_test.sh
 
   pg_delete_target_delta_find_full_test:
     <<: *pg_test_common
@@ -466,12 +580,46 @@ services:
     command: /tmp/tests/pgbackrest_backup_fetch_test.sh
     <<: *s3_common_depends
 
+  orioledb:
+    build:
+      dockerfile: docker/orioledb/Dockerfile
+      context: .
+    image: wal-g/orioledb
+
+  orioledb_compatibility_test:
+    image: wal-g/orioledb
+    user: postgres
+    container_name: wal-g_orioledb_compatibility_test
+    command: /tmp/tests/compatibility_test.sh
+    <<: *s3_common_depends
+
+  orioledb_simple_test:
+    image: wal-g/orioledb
+    user: postgres
+    container_name: wal-g_orioledb_simple_test
+    command: /tmp/tests/simple_test.sh
+    <<: *s3_common_depends
+
+  orioledb_compressed_test:
+    image: wal-g/orioledb
+    user: postgres
+    container_name: wal-g_orioledb_compressed_test
+    command: /tmp/tests/compressed_test.sh
+    <<: *s3_common_depends
+
   mysql:
     build:
       dockerfile: docker/mysql/Dockerfile
       context: .
     image: wal-g/mysql
     container_name: wal-g_mysql
+
+  mysql8:
+    build:
+      dockerfile: docker/mysql/Dockerfile_v8
+      context: .
+    image: wal-g/mysql8
+    container_name: wal-g_mysql8
 
   mysql_base_tests:
     build:
@@ -484,7 +632,7 @@ services:
     env_file:
       - docker/common/common_walg.env
     <<: *s3_common_depends
-  
+
   mysql_delete_tests:
     build:
       dockerfile: docker/mysql_tests/Dockerfile_delete
@@ -513,6 +661,18 @@ services:
     links:
       - s3
       - s3-another
+
+  mysql8_tests:
+    build:
+      dockerfile: docker/mysql_tests/Dockerfile_v8
+      context: .
+    security_opt:
+      - seccomp:unconfined
+    image: wal-g/mysql8_tests
+    container_name: wal-g_mysql8_tests
+    env_file:
+      - docker/common/common_walg.env
+    <<: *s3_common_depends
 
   mariadb:
     build:
@@ -567,6 +727,24 @@ services:
       - docker/common/common_walg.env
     <<: *s3_common_depends
 
+  etcd:
+    build:
+      dockerfile: docker/etcd/Dockerfile
+      context: .
+    image: wal-g/etcd
+    container_name: wal-g_etcd
+    environment:
+      - ALLOW_NONE_AUTHENTICATION=yes
+
+  etcd_tests:
+    build:
+      dockerfile: docker/etcd_tests/Dockerfile
+      context: .
+    image: wal-g/etcd_tests
+    container_name: wal-g_etcd_tests
+    depends_on:
+      - etcd
+
   gp:
     build:
       dockerfile: docker/gp/Dockerfile
@@ -582,6 +760,25 @@ services:
     container_name: wal-g_gp_tests
     depends_on:
       - gp
+      - s3
+    links:
+      - s3
+
+  cloudberry:
+    build:
+      dockerfile: docker/cloudberry/Dockerfile
+      context: .
+    image: wal-g/cloudberry
+    container_name: wal-g_cloudberry
+
+  cloudberry_tests:
+    build:
+      dockerfile: docker/cloudberry_tests/Dockerfile
+      context: .
+    image: wal-g/cloudberry_tests
+    container_name: wal-g_cloudberry_tests
+    depends_on:
+      - cloudberry
       - s3
     links:
       - s3

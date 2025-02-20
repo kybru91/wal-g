@@ -6,7 +6,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"io"
-	"strconv"
+	"time"
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/service/s3"
@@ -14,23 +14,34 @@ import (
 	"github.com/aws/aws-sdk-go/service/s3/s3manager"
 	"github.com/aws/aws-sdk-go/service/s3/s3manager/s3manageriface"
 	"github.com/pkg/errors"
-	"github.com/wal-g/tracelog"
 )
 
-const (
-	DefaultMaxPartSize = 20 << 20
-)
-
-type SseKmsIDNotSetError struct {
-	error
+type UploaderConfig struct {
+	UploadConcurrency            int
+	MaxPartSize                  int
+	StorageClass                 string
+	ServerSideEncryption         string
+	ServerSideEncryptionCustomer string
+	ServerSideEncryptionKMSID    string
+	RetentionPeriod              int
+	RetentionMode                string
 }
 
-func NewSseKmsIDNotSetError() SseKmsIDNotSetError {
-	return SseKmsIDNotSetError{errors.Errorf("%s must be set if using aws:kms encryption", SseKmsIDSetting)}
-}
+func createUploader(s3Client *s3.S3, config *UploaderConfig) (*Uploader, error) {
+	uploaderAPI := CreateUploaderAPI(s3Client, config.MaxPartSize, config.UploadConcurrency)
 
-func (err SseKmsIDNotSetError) Error() string {
-	return fmt.Sprintf(tracelog.GetErrorFormatter(), err.error)
+	if (config.ServerSideEncryption == "aws:kms") == (config.ServerSideEncryptionKMSID == "") {
+		return nil, fmt.Errorf("server-side encryption KMS key ID must be set if 'aws:kms' encryption is used")
+	}
+	return NewUploader(
+		uploaderAPI,
+		config.ServerSideEncryption,
+		config.ServerSideEncryptionCustomer,
+		config.ServerSideEncryptionKMSID,
+		config.StorageClass,
+		config.RetentionMode,
+		config.RetentionPeriod,
+	), nil
 }
 
 type Uploader struct {
@@ -39,19 +50,35 @@ type Uploader struct {
 	SSECustomerKey       string
 	SSEKMSKeyID          string
 	StorageClass         string
+	RetentionMode        string
+	RetentionPeriod      time.Duration
 }
 
-func NewUploader(uploaderAPI s3manageriface.UploaderAPI, serverSideEncryption, sseCustomerKey, sseKmsKeyID, storageClass string) *Uploader {
-	return &Uploader{uploaderAPI, serverSideEncryption, sseCustomerKey, sseKmsKeyID, storageClass}
+func NewUploader(uploaderAPI s3manageriface.UploaderAPI, serverSideEncryption, sseCustomerKey, sseKmsKeyID, storageClass,
+	retentionMode string, retentionPeriod int) *Uploader {
+	if retentionMode == "" {
+		retentionMode = "GOVERNANCE"
+	}
+	return &Uploader{uploaderAPI,
+		serverSideEncryption,
+		sseCustomerKey,
+		sseKmsKeyID,
+		storageClass,
+		retentionMode,
+		time.Duration(retentionPeriod)}
 }
 
-// TODO : unit tests
 func (uploader *Uploader) createUploadInput(bucket, path string, content io.Reader) *s3manager.UploadInput {
 	uploadInput := &s3manager.UploadInput{
 		Bucket:       aws.String(bucket),
 		Key:          aws.String(path),
 		Body:         content,
 		StorageClass: aws.String(uploader.StorageClass),
+	}
+	if uploader.RetentionPeriod != defaultDisabledRetentionPeriod {
+		mytime := time.Now().Add(time.Second * uploader.RetentionPeriod)
+		uploadInput.ObjectLockMode = &uploader.RetentionMode
+		uploadInput.ObjectLockRetainUntilDate = &mytime
 	}
 
 	if uploader.serverSideEncryption != "" {
@@ -90,22 +117,11 @@ func CreateUploaderAPI(svc s3iface.S3API, partsize, concurrency int) s3managerif
 	return uploaderAPI
 }
 
-// TODO : unit tests
-func configureServerSideEncryption(settings map[string]string) (serverSideEncryption string, sseCustomerKey string, sseKmsKeyID string, err error) { // nolint: lll
-	serverSideEncryption = settings[SseSetting]
-	sseCustomerKey = settings[SseCSetting]
-	sseKmsKeyID = settings[SseKmsIDSetting]
-
-	// Only aws:kms implies sseKmsKeyID
-	if (serverSideEncryption == "aws:kms") == (sseKmsKeyID == "") {
-		return "", "", "", NewSseKmsIDNotSetError()
-	}
-	return
-}
-
-// TODO : unit tests
 func partitionStrings(strings []string, blockSize int) [][]string {
 	// I've unsuccessfully tried this with interface{} but there was too much of casting
+	if blockSize <= 0 {
+		return [][]string{strings}
+	}
 	partition := make([][]string, 0)
 	for i := 0; i < len(strings); i += blockSize {
 		if i+blockSize > len(strings) {
@@ -115,42 +131,4 @@ func partitionStrings(strings []string, blockSize int) [][]string {
 		}
 	}
 	return partition
-}
-
-// TODO : unit tests
-func configureUploader(s3Client *s3.S3, settings map[string]string) (*Uploader, error) {
-	var concurrency int
-	var err error
-	if strConcurrency, ok := settings[UploadConcurrencySetting]; ok {
-		concurrency, err = strconv.Atoi(strConcurrency)
-		if err != nil {
-			return nil, NewFolderError(err, "Invalid upload concurrency setting")
-		}
-	} else {
-		return nil, NewConfiguringError(UploadConcurrencySetting)
-	}
-
-	var maxPartSize int
-	if strMaxPartSize, ok := settings[MaxPartSize]; ok {
-		maxPartSize, err = strconv.Atoi(strMaxPartSize)
-		if err != nil {
-			return nil, NewFolderError(err, "Invalid s3 max part size setting")
-		}
-	} else {
-		maxPartSize = DefaultMaxPartSize
-	}
-
-	uploaderAPI := CreateUploaderAPI(s3Client, maxPartSize, concurrency)
-
-	serverSideEncryption, sseCustomerKey, sseKmsKeyID, err := configureServerSideEncryption(settings)
-	if err != nil {
-		return nil, errors.Wrap(err, "failed to configure server side encryption")
-	}
-
-	var storageClass string
-	var ok bool
-	if storageClass, ok = settings[StorageClassSetting]; !ok {
-		storageClass = "STANDARD"
-	}
-	return NewUploader(uploaderAPI, serverSideEncryption, sseCustomerKey, sseKmsKeyID, storageClass), nil
 }

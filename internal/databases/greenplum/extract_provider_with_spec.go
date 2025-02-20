@@ -4,6 +4,7 @@ import (
 	"strings"
 
 	"github.com/wal-g/tracelog"
+
 	"github.com/wal-g/wal-g/internal"
 	"github.com/wal-g/wal-g/internal/databases/postgres"
 )
@@ -15,22 +16,18 @@ const (
 type RestoreDescMaker struct{}
 
 func (m RestoreDescMaker) Make(restoreParameters []string, names postgres.DatabasesByNames) (postgres.RestoreDesc, error) {
-	restoredDatabases, err := postgres.DefaultRestoreDescMaker{}.Make(restoreParameters, names)
+	restoredDatabases, err := postgres.RegexpRestoreDescMaker{}.Make(restoreParameters, names)
 	if err != nil {
 		return nil, err
 	}
 
 	for _, dbInfo := range names {
-		if _, dbNotSkipped := restoredDatabases[dbInfo.Oid]; !dbNotSkipped {
-			continue
-		}
-		for table, tableID := range dbInfo.Tables {
+		for table, tableInfo := range dbInfo.Tables {
 			if m.FromAoSegNamespace(table) {
-				restoredDatabases.Add(dbInfo.Oid, tableID)
+				restoredDatabases.Add(dbInfo.Oid, tableInfo.Relfilenode, tableInfo.Oid)
 			}
 		}
 	}
-
 	return restoredDatabases, nil
 }
 
@@ -53,7 +50,7 @@ func (p ExtractProviderDBSpec) Get(
 	skipRedundantTars bool,
 	dbDataDir string,
 	createNewIncrementalFiles bool,
-) (postgres.IncrementalTarInterpreter, []internal.ReaderMaker, string, error) {
+) (postgres.IncrementalTarInterpreter, []internal.ReaderMaker, []internal.ReaderMaker, error) {
 	_, filesMeta, err := backup.GetSentinelAndFilesMetadata()
 	tracelog.ErrorLogger.FatalOnError(err)
 

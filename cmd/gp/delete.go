@@ -3,11 +3,15 @@ package gp
 import (
 	"github.com/spf13/cobra"
 	"github.com/wal-g/tracelog"
+
 	"github.com/wal-g/wal-g/internal"
 	"github.com/wal-g/wal-g/internal/databases/greenplum"
+	"github.com/wal-g/wal-g/internal/multistorage/policies"
 )
 
 var confirmed = false
+var forceDelete = false
+
 var deleteTargetUserData = ""
 
 const DeleteGarbageExamples = `  garbage           Deletes outdated WAL archives and leftover backups files from storage`
@@ -56,40 +60,40 @@ var deleteGarbageCmd = &cobra.Command{
 }
 
 func runDeleteBefore(cmd *cobra.Command, args []string) {
-	folder, err := internal.ConfigureFolder()
+	rootFolder, err := getMultistorageRootFolder(true, policies.UniteAllStorages)
 	tracelog.ErrorLogger.FatalOnError(err)
 
-	delArgs := greenplum.DeleteArgs{Confirmed: confirmed}
-	deleteHandler, err := greenplum.NewDeleteHandler(folder, delArgs)
+	delArgs := greenplum.DeleteArgs{Confirmed: confirmed, Force: forceDelete}
+	deleteHandler, err := greenplum.NewDeleteHandler(rootFolder, delArgs)
 	tracelog.ErrorLogger.FatalOnError(err)
 
 	deleteHandler.HandleDeleteBefore(args)
 }
 
 func runDeleteRetain(cmd *cobra.Command, args []string) {
-	folder, err := internal.ConfigureFolder()
+	rootFolder, err := getMultistorageRootFolder(true, policies.UniteAllStorages)
 	tracelog.ErrorLogger.FatalOnError(err)
 
-	delArgs := greenplum.DeleteArgs{Confirmed: confirmed}
-	deleteHandler, err := greenplum.NewDeleteHandler(folder, delArgs)
+	delArgs := greenplum.DeleteArgs{Confirmed: confirmed, Force: forceDelete}
+	deleteHandler, err := greenplum.NewDeleteHandler(rootFolder, delArgs)
 	tracelog.ErrorLogger.FatalOnError(err)
 
 	deleteHandler.HandleDeleteRetain(args)
 }
 
 func runDeleteEverything(cmd *cobra.Command, args []string) {
-	folder, err := internal.ConfigureFolder()
+	rootFolder, err := getMultistorageRootFolder(true, policies.UniteAllStorages)
 	tracelog.ErrorLogger.FatalOnError(err)
 
-	delArgs := greenplum.DeleteArgs{Confirmed: confirmed}
-	deleteHandler, err := greenplum.NewDeleteHandler(folder, delArgs)
+	delArgs := greenplum.DeleteArgs{Confirmed: confirmed, Force: forceDelete}
+	deleteHandler, err := greenplum.NewDeleteHandler(rootFolder, delArgs)
 	tracelog.ErrorLogger.FatalOnError(err)
 
 	deleteHandler.HandleDeleteEverything(args)
 }
 
 func runDeleteTarget(cmd *cobra.Command, args []string) {
-	folder, err := internal.ConfigureFolder()
+	rootFolder, err := getMultistorageRootFolder(true, policies.UniteAllStorages)
 	tracelog.ErrorLogger.FatalOnError(err)
 
 	findFullBackup := false
@@ -100,8 +104,8 @@ func runDeleteTarget(cmd *cobra.Command, args []string) {
 		args = args[1:]
 	}
 
-	delArgs := greenplum.DeleteArgs{Confirmed: confirmed, FindFull: findFullBackup}
-	deleteHandler, err := greenplum.NewDeleteHandler(folder, delArgs)
+	delArgs := greenplum.DeleteArgs{Confirmed: confirmed, FindFull: findFullBackup, Force: forceDelete}
+	deleteHandler, err := greenplum.NewDeleteHandler(rootFolder, delArgs)
 	tracelog.ErrorLogger.FatalOnError(err)
 
 	targetBackupSelector, err := internal.CreateTargetDeleteBackupSelector(
@@ -112,11 +116,11 @@ func runDeleteTarget(cmd *cobra.Command, args []string) {
 }
 
 func runDeleteGarbage(cmd *cobra.Command, args []string) {
-	folder, err := internal.ConfigureFolder()
+	rootFolder, err := getMultistorageRootFolder(true, policies.UniteAllStorages)
 	tracelog.ErrorLogger.FatalOnError(err)
 
-	delArgs := greenplum.DeleteArgs{Confirmed: confirmed}
-	deleteHandler, err := greenplum.NewDeleteHandler(folder, delArgs)
+	delArgs := greenplum.DeleteArgs{Confirmed: confirmed, Force: true}
+	deleteHandler, err := greenplum.NewDeleteHandler(rootFolder, delArgs)
 	tracelog.ErrorLogger.FatalOnError(err)
 
 	err = deleteHandler.HandleDeleteGarbage(args)
@@ -131,4 +135,6 @@ func init() {
 
 	deleteCmd.AddCommand(deleteRetainCmd, deleteBeforeCmd, deleteEverythingCmd, deleteTargetCmd, deleteGarbageCmd)
 	deleteCmd.PersistentFlags().BoolVar(&confirmed, internal.ConfirmFlag, false, "Confirms backup deletion")
+	deleteCmd.PersistentFlags().BoolVar(&forceDelete, "force-delete", false, "Force delete")
+	_ = deleteCmd.PersistentFlags().MarkHidden("force-delete")
 }

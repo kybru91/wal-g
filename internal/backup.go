@@ -36,6 +36,9 @@ func (err SentinelMarshallingError) Error() string {
 // so the metadata file is useful for the quick fetch of backup-related information.
 // see FetchMetadata, UploadMetadata
 //
+// Metadata file (only for MySQL) - stores information about backup format.
+// WAL-G uses it to understand how to handle backup files during restore operations.
+//
 // All files of the backup must be stored in a single storage.
 type Backup struct {
 	Name string
@@ -84,7 +87,6 @@ func (backup *Backup) FetchSentinel(sentinelDto interface{}) error {
 	return FetchDto(backup.Folder, sentinelDto, backup.getStopSentinelPath())
 }
 
-// TODO : unit tests
 func (backup *Backup) FetchMetadata(metadataDto interface{}) error {
 	return FetchDto(backup.Folder, metadataDto, backup.getMetadataPath())
 }
@@ -151,7 +153,6 @@ func (backup *Backup) GetStorageName() string {
 	return multistorage.UsedStorages(backup.Folder)[0]
 }
 
-// TODO : unit tests
 func UploadSentinel(uploader Uploader, sentinelDto interface{}, backupName string) error {
 	sentinelName := SentinelNameFromBackup(backupName)
 	return UploadDto(uploader.Folder(), sentinelDto, sentinelName)

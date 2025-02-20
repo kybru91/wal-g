@@ -1,6 +1,7 @@
 package postgres
 
 import (
+	"context"
 	"fmt"
 	"io"
 
@@ -96,9 +97,9 @@ func QueryCurrentWalSegment() WalSegmentDescription {
 	currentTimeline, err := queryRunner.readTimeline()
 	tracelog.ErrorLogger.FatalfOnError("Failed to get current timeline %v", err)
 
-	tracelog.InfoLogger.Printf("Current WAL segment: %s\n", currentSegmentNo.getFilename(currentTimeline))
+	tracelog.InfoLogger.Printf("Current WAL segment: %s\n", currentSegmentNo.GetFilename(currentTimeline))
 
-	err = conn.Close()
+	err = conn.Close(context.TODO())
 	tracelog.WarningLogger.PrintOnError(err)
 
 	// currentSegment is the current WAL segment of the cluster
@@ -170,5 +171,5 @@ func getCurrentWalSegmentNo(queryRunner *PgQueryRunner) (WalSegmentNo, error) {
 	if err != nil {
 		return 0, err
 	}
-	return newWalSegmentNo(lsn - 1), nil
+	return NewWalSegmentNo(lsn - 1), nil
 }

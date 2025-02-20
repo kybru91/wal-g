@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,10 +12,12 @@ import (
 	"sync/atomic"
 
 	"github.com/wal-g/wal-g/internal"
+	"github.com/wal-g/wal-g/internal/databases/postgres/orioledb"
 
 	"github.com/RoaringBitmap/roaring"
 	"github.com/pkg/errors"
 	"github.com/wal-g/tracelog"
+
 	"github.com/wal-g/wal-g/internal/crypto"
 	"github.com/wal-g/wal-g/utility"
 )
@@ -46,6 +49,7 @@ func init() {
 		"log", "pg_log", "pg_xlog", "pg_wal", // Directories
 		"pgsql_tmp", "postgresql.auto.conf.tmp", "postmaster.pid", "postmaster.opts", "recovery.conf", // Files
 		"pg_dynshmem", "pg_notify", "pg_replslot", "pg_serial", "pg_stat_tmp", "pg_snapshots", "pg_subtrans", // Directories
+		"standby.signal", // Signal files
 	}
 
 	for _, filename := range filesToExclude {
@@ -71,6 +75,8 @@ type Bundle struct {
 	DataCatalogSize    *int64
 
 	forceIncremental bool
+
+	IncrementFromChkpNum *uint32
 }
 
 // TODO: use DiskDataFolder
@@ -81,7 +87,7 @@ func NewBundle(
 ) *Bundle {
 	return &Bundle{
 		Bundle: internal.Bundle{
-			Directory:         directory,
+			Directories:       []string{directory},
 			Crypter:           crypter,
 			TarSizeThreshold:  tarSizeThreshold,
 			ExcludedFilenames: ExcludedFilenames,
@@ -146,7 +152,7 @@ func (bundle *Bundle) checkTimelineChanged(queryRunner *PgQueryRunner) bool {
 func (bundle *Bundle) StartBackup(queryRunner *PgQueryRunner,
 	backup string) (backupName string, lsn LSN, err error) {
 	var name, lsnStr string
-	name, lsnStr, bundle.Replica, err = queryRunner.startBackup(backup)
+	name, lsnStr, bundle.Replica, err = queryRunner.StartBackup(backup)
 
 	if err != nil {
 		return "", 0, err
@@ -274,8 +280,7 @@ func (bundle *Bundle) addToBundle(path string, info os.FileInfo) error {
 			bundle.TarBallComposer.SkipFile(fileInfoHeader, info)
 			return nil
 		}
-		incrementBaseLsn := bundle.getIncrementBaseLsn()
-		isIncremented := incrementBaseLsn != nil && (wasInBase || bundle.forceIncremental) && isPagedFile(info, path)
+		isIncremented := bundle.isIncremented(path, wasInBase, info)
 		bundle.TarBallComposer.AddFile(internal.NewComposeFileInfo(path, info, wasInBase, isIncremented, fileInfoHeader))
 	} else {
 		err := bundle.TarBallComposer.AddHeader(fileInfoHeader, info)
@@ -288,6 +293,14 @@ func (bundle *Bundle) addToBundle(path string, info os.FileInfo) error {
 	}
 
 	return nil
+}
+
+// isPagedFile checks basic expectations for paged file
+func (bundle *Bundle) isIncremented(path string, wasInBase bool, info fs.FileInfo) bool {
+	incrementBaseLsn := bundle.getIncrementBaseLsn()
+	isIncremented := incrementBaseLsn != nil && (wasInBase || bundle.forceIncremental) && isPagedFile(info, path)
+	isIncremented = isIncremented || (bundle.IncrementFromChkpNum != nil && wasInBase && orioledb.IsOrioledbDataFile(info, path))
+	return isIncremented
 }
 
 // TODO : unit tests
@@ -342,8 +355,8 @@ func (bundle *Bundle) UploadPgControl(compressorFileExtension string) error {
 // TODO : unit tests
 // UploadLabelFiles creates the `backup_label` and `tablespace_map` files by stopping the backup
 // and uploads them to S3.
-func (bundle *Bundle) uploadLabelFiles(queryRunner *PgQueryRunner) (string, []string, LSN, error) {
-	label, offsetMap, lsnStr, err := queryRunner.stopBackup()
+func (bundle *Bundle) uploadLabelFiles(queryRunner *PgQueryRunner, compressorFileExtension string) (string, []string, LSN, error) {
+	label, offsetMap, lsnStr, err := queryRunner.StopBackup()
 	if err != nil {
 		return "", nil, 0, errors.Wrap(err, "UploadLabelFiles: failed to stop backup")
 	}
@@ -358,7 +371,7 @@ func (bundle *Bundle) uploadLabelFiles(queryRunner *PgQueryRunner) (string, []st
 	}
 
 	tarBall := bundle.NewTarBall(false)
-	tarBall.SetUp(bundle.Crypter)
+	tarBall.SetUp(bundle.Crypter, "backup_label.tar."+compressorFileExtension)
 
 	labelHeader := &tar.Header{
 		Name:     BackupLabelFilename,

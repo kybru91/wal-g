@@ -6,9 +6,11 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
 
 	"github.com/pkg/errors"
 	"github.com/wal-g/tracelog"
+	conf "github.com/wal-g/wal-g/internal/config"
 )
 
 const (
@@ -17,11 +19,13 @@ const (
 
 type LocalStorage struct {
 	MongodDBPath string
+	whitelist    *regexp.Regexp
 }
 
 func CreateLocalStorage(mongodDBPath string) *LocalStorage {
 	return &LocalStorage{
 		MongodDBPath: mongodDBPath,
+		whitelist:    CreateWhiteList(),
 	}
 }
 
@@ -64,7 +68,13 @@ func (localStorage *LocalStorage) CleanupMongodDBPath() error {
 		return nil
 	}
 	for _, name := range names {
-		err = os.RemoveAll(filepath.Join(localStorage.MongodDBPath, name))
+		fullPath := filepath.Join(localStorage.MongodDBPath, name)
+		if localStorage.whitelist != nil && localStorage.whitelist.MatchString(name) {
+			tracelog.InfoLogger.Printf("skip remove %s", fullPath)
+			continue
+		}
+
+		err = os.RemoveAll(fullPath)
 		if err != nil {
 			return errors.Wrapf(err, "unable to remove '%s' in '%s'", name, localStorage.MongodDBPath)
 		}
@@ -80,12 +90,31 @@ func (localStorage *LocalStorage) EnsureEmptyDBPath() error {
 	}
 	defer func() { _ = openedPath.Close() }()
 
-	_, err = openedPath.Readdirnames(1)
+	names, err := openedPath.Readdirnames(-1)
 	if err == io.EOF {
 		return nil
 	}
+
 	if err != nil {
 		return errors.Wrap(err, "readdirnames dir")
 	}
-	return fmt.Errorf("directory '%v' is not empty", localStorage.MongodDBPath)
+
+	for _, name := range names {
+		if localStorage.whitelist == nil || !localStorage.whitelist.MatchString(name) {
+			return fmt.Errorf("directory '%v' is not empty", localStorage.MongodDBPath)
+		}
+	}
+
+	return nil
+}
+
+func CreateWhiteList() *regexp.Regexp {
+	val, ok := conf.GetSetting(conf.MongoDBDeletionProtectionWhitelist)
+	re, err := regexp.Compile(val)
+
+	if !ok || err != nil {
+		return regexp.MustCompile(`^lost\+found$`)
+	}
+
+	return re
 }

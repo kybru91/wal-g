@@ -8,6 +8,7 @@ import (
 	"github.com/spf13/viper"
 	"github.com/wal-g/tracelog"
 	"github.com/wal-g/wal-g/internal"
+	conf "github.com/wal-g/wal-g/internal/config"
 	"github.com/wal-g/wal-g/internal/databases/postgres"
 )
 
@@ -23,20 +24,26 @@ var WalPrefetchCmd = &cobra.Command{
 	Run: func(cmd *cobra.Command, args []string) {
 		reconfigureLoggers()
 
-		folderReader := GetWalFolderReader()
-		err := postgres.HandleWALPrefetch(folderReader, args[0], args[1])
+		storage, err := internal.ConfigureMultiStorage(false)
+		tracelog.ErrorLogger.FatalfOnError("Failed to configure multi-storage: %v", err)
+
+		folderReader, err := internal.PrepareMultiStorageFolderReader(storage.RootFolder(), targetStorage)
+		tracelog.ErrorLogger.FatalOnError(err)
+
+		err = postgres.HandleWALPrefetch(folderReader, args[0], args[1])
 		tracelog.ErrorLogger.FatalOnError(err)
 	},
 }
 
 func init() {
 	Cmd.AddCommand(WalPrefetchCmd)
+	WalPrefetchCmd.Flags().StringVar(&targetStorage, "target-storage", "", targetStorageDescription)
 }
 
 // wal-prefetch (WalPrefetchCmd) is internal tool, so to avoid confusion about errors in restoration process
 // we reconfigure loggers specially for internal use. All logs having PREFETCH prefix can be safely ignored
 func reconfigureLoggers() {
-	if viper.Get(internal.LogLevelSetting) == tracelog.DevelLogLevel {
+	if viper.Get(conf.LogLevelSetting) == tracelog.DevelLogLevel {
 		addPrefetchPrefixToAllLoggers()
 		return
 	}

@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e -x
 
-CONFIG_FILE="/tmp/configs/partial_database_restore_test_config.json"
+CONFIG_FILE="/tmp/configs/partial_restore_test_config.json"
 COMMON_CONFIG="/tmp/configs/common_config.json"
 TMP_CONFIG="/tmp/configs/tmp_config.json"
 cat ${CONFIG_FILE} > ${TMP_CONFIG}
@@ -13,7 +13,6 @@ source /tmp/tests/test_functions/util.sh
 wal-g --config=${TMP_CONFIG} delete everything FORCE --confirm
 
 bootstrap_gp_cluster
-sleep 3
 enable_pitr_extension
 setup_wal_archiving
 
@@ -61,15 +60,15 @@ elif [ "$(psql -p 6000 -t -c "select a, b from co order by a, b;" -d to_restore 
   exit 1
 fi
 
-if ! psql -p 6000 -t -c "select a from heap order by a;" -d to_skip -A 2>&1 | grep -q "is not a valid data directory"; then
+if ! psql -p 6000 -t -c "select a from heap order by a;" -d to_skip -A 2>&1 | grep -q "could not open file"; then
   echo "Error: to_skip database directory must be emtpy after partial fetch"
   echo "$(psql -p 6000 -t -c "select a from heap order by a;" -d to_skip -A)"
   exit 1
-elif ! psql -p 6000 -t -c "select a, b from ao order by a, b;" -d to_skip -A 2>&1 | grep "is not a valid data directory"; then
+elif ! psql -p 6000 -t -c "select a, b from ao order by a, b;" -d to_skip -A 2>&1 | grep "append-Only storage read could not open segment file"; then
   echo "Error: to_skip database directory must be emtpy after partial fetch"
   echo "$(psql -p 6000 -t -c "select a, b from ao order by a, b;" -d to_skip -A)"
   exit 1
-elif ! psql -p 6000 -t -c "select a, b from co order by a, b;" -d to_skip -A 2>&1 | grep "is not a valid data directory"; then
+elif ! psql -p 6000 -t -c "select a, b from co order by a, b;" -d to_skip -A 2>&1 | grep "append-Only storage read could not open segment file"; then
   echo "Error: to_skip database directory must be emtpy after partial fetch"
   echo "$(psql -p 6000 -t -c "select a, b from co order by a, b;" -d to_skip -A)"
   exit 1

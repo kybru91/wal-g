@@ -74,6 +74,27 @@ Set this setting to `true` to use [ListObjects](https://docs.aws.amazon.com/Amaz
 
 Overrides the default request retry limit while interacting with S3. Default is 15.
 
+* `S3_MIN_THROTTLING_RETRY_DELAY`
+
+Overrides the default minimum time between retries when throttled in milliseconds. Default is 500ms.
+
+* `S3_MAX_THROTTLING_RETRY_DELAY`
+
+Overrides the default minimum time between retries when throttled in milliseconds. Default is 300000ms.
+
+* `S3_RETENTION_PERIOD`
+
+Sets retention period in seconds to files, uploaded to s3. Default is disabled with value -1.
+
+* `S3_RETENTION_MODE`
+
+Sets mode of retention (GOVERNANCE/COMPLIANCE). Default is GOVERNANCE, which means, that files can still be deleted if user has special permissions.
+COMPLIANCE mode prohibits deletion for everyone before retention period is over.
+
+* `S3_SKIP_VALIDATION`
+
+By default wal-g validates s3 credentials before work. If you want to disable validation, set this setting to true.
+
 GCS
 -----------
 To store backups in Google Cloud Storage, WAL-G requires that this variable be set:
@@ -121,7 +142,7 @@ WAL-G determines Azure Storage credentials using the [azure default credential c
 
 Alternatively, you can set `AZURE_STORAGE_ACCESS_KEY` to authenticate using the storage account's [access keys](https://docs.microsoft.com/en-us/azure/storage/common/storage-account-keys-manage), or set `AZURE_STORAGE_SAS_TOKEN` to make use of [SAS tokens](https://docs.microsoft.com/en-us/azure/storage/common/storage-sas-overview).
 
-For deployments where Azure Storage is not under AzurePuplicCloud environment, WAL-G need to use different Azure Storage endpoint. You can use optional setting `AZURE_STORAGE_SAS_TOKEN` to select the correct Azure Storage endpoint. Available setting values:  `"AzurePublicCloud"`, `"AzureUSGovernmentCloud"`, `"AzureChinaCloud"`, `"AzureGermanCloud"`. If setting is omitted or has a value different to the ones defined here, WAL-G will default to the Azure Storage endpoint for AzurePublicCloud.
+For deployments where Azure Storage is not under AzurePuplicCloud environment, WAL-G need to use different Azure Storage endpoint. You can use optional setting `AZURE_ENVIRONMENT_NAME` to select the correct Azure Environment, which will set the right Storage endpoint. Available setting values:  `"AzurePublicCloud"`, `"AzureUSGovernmentCloud"`, `"AzureChinaCloud"`, `"AzureGermanCloud"`. If setting is omitted or has a value different to the ones defined here, WAL-G will default to AzurePublicCloud.
 
 WAL-G sets default upload buffer size to 64 Megabytes and uses 3 buffers by default. However, users can choose to override these values by setting optional environment variables.
 

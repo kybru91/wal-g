@@ -10,7 +10,6 @@ cat ${COMMON_CONFIG} >> ${TMP_CONFIG}
 source /tmp/tests/test_functions/util.sh
 
 bootstrap_gp_cluster
-sleep 3
 setup_wal_archiving
 enable_pitr_extension
 
@@ -19,7 +18,6 @@ wal-g --config=${TMP_CONFIG} delete everything FORCE --confirm
 for i in 1 2
 do
     insert_data
-    sleep 1
     wal-g --config=${TMP_CONFIG} backup-push ${PGDATA}
 done
 

@@ -15,6 +15,8 @@ import (
 	"github.com/pkg/errors"
 	"github.com/spf13/viper"
 	"github.com/wal-g/tracelog"
+	conf "github.com/wal-g/wal-g/internal/config"
+	pg_errors "github.com/wal-g/wal-g/internal/databases/postgres/errors"
 	"github.com/wal-g/wal-g/internal/fsutil"
 	"github.com/wal-g/wal-g/utility"
 )
@@ -25,7 +27,7 @@ func HandleWALPrefetch(folderReader internal.StorageFolderReader, walFileName st
 	var fileName = walFileName
 	location = path.Dir(location)
 	waitGroup := &sync.WaitGroup{}
-	concurrency, err := internal.GetMaxDownloadConcurrency()
+	concurrency, err := conf.GetMaxDownloadConcurrency()
 	if err != nil {
 		return fmt.Errorf("get max concurrency: %v", err)
 	}
@@ -75,7 +77,7 @@ func prefaultData(prefaultStartLsn LSN, timelineID uint32, waitGroup *sync.WaitG
 	archiveDirectory = filepath.Dir(archiveDirectory)
 	archiveDirectory = filepath.Dir(archiveDirectory)
 	bundle := NewBundle(archiveDirectory, nil, "", &prefaultStartLsn, nil,
-		false, viper.GetInt64(internal.TarSizeThresholdSetting))
+		false, viper.GetInt64(conf.TarSizeThresholdSetting))
 	bundle.Timeline = timelineID
 	startLsn := prefaultStartLsn + LSN(WalSegmentSize*WalFileInDelta)
 	err = bundle.DownloadDeltaMap(folderReader.SubFolder(utility.WalPath), startLsn)
@@ -170,7 +172,7 @@ func (bundle *Bundle) prefaultFile(path string, info os.FileInfo, fileInfoHeader
 			}
 			tracelog.InfoLogger.Println("Prefaulting ", path)
 			fileReader, fileInfoHeader.Size, err = ReadIncrementalFile(path, info.Size(), *incrementBaseLsn, bitmap)
-			if _, ok := err.(InvalidBlockError); ok {
+			if _, ok := err.(pg_errors.InvalidBlockError); ok {
 				return nil
 			} else if err != nil {
 				return errors.Wrapf(err, "packFileIntoTar: failed reading incremental file '%s'\n", path)

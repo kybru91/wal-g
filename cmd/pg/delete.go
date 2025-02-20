@@ -5,6 +5,9 @@ import (
 	"github.com/wal-g/tracelog"
 	"github.com/wal-g/wal-g/internal"
 	"github.com/wal-g/wal-g/internal/databases/postgres"
+	"github.com/wal-g/wal-g/internal/multistorage"
+	"github.com/wal-g/wal-g/internal/multistorage/policies"
+	"github.com/wal-g/wal-g/pkg/storages/storage"
 )
 
 const UseSentinelTimeFlag = "use-sentinel-time"
@@ -13,6 +16,7 @@ const DeleteGarbageExamples = `  garbage           Deletes outdated WAL archives
   garbage ARCHIVES  Deletes only outdated WAL archives from storage
   garbage BACKUPS   Deletes only leftover backups files from storage`
 const DeleteGarbageUse = "garbage [ARCHIVES|BACKUPS]"
+const afterFlag = "after"
 
 var confirmed = false
 var useSentinelTime = false
@@ -35,6 +39,7 @@ var deleteRetainCmd = &cobra.Command{
 	Use:       internal.DeleteRetainUsageExample, // TODO : improve description
 	Example:   internal.DeleteRetainExamples,
 	ValidArgs: internal.StringModifiers,
+	Args:      internal.DeleteRetainArgsValidator,
 	Run:       runDeleteRetain,
 }
 
@@ -61,8 +66,7 @@ var deleteGarbageCmd = &cobra.Command{
 }
 
 func runDeleteBefore(cmd *cobra.Command, args []string) {
-	folder, err := internal.ConfigureFolder()
-	tracelog.ErrorLogger.FatalOnError(err)
+	folder := configureFolder()
 
 	permanentBackups, permanentWals := postgres.GetPermanentBackupsAndWals(folder)
 
@@ -73,32 +77,40 @@ func runDeleteBefore(cmd *cobra.Command, args []string) {
 }
 
 func runDeleteRetain(cmd *cobra.Command, args []string) {
-	folder, err := internal.ConfigureFolder()
-	tracelog.ErrorLogger.FatalOnError(err)
+	folder := configureFolder()
 
 	permanentBackups, permanentWals := postgres.GetPermanentBackupsAndWals(folder)
 
 	deleteHandler, err := postgres.NewDeleteHandler(folder, permanentBackups, permanentWals, useSentinelTime)
 	tracelog.ErrorLogger.FatalOnError(err)
 
-	deleteHandler.HandleDeleteRetain(args, confirmed)
+	afterValue, _ := cmd.Flags().GetString(afterFlag)
+	if afterValue == "" {
+		deleteHandler.HandleDeleteRetain(args, confirmed)
+	} else {
+		deleteHandler.HandleDeleteRetainAfter(append(args, afterValue), confirmed)
+	}
 }
 
 func runDeleteEverything(cmd *cobra.Command, args []string) {
-	folder, err := internal.ConfigureFolder()
-	tracelog.ErrorLogger.FatalOnError(err)
+	folder := configureFolder()
 
 	permanentBackups, permanentWals := postgres.GetPermanentBackupsAndWals(folder)
 
 	deleteHandler, err := postgres.NewDeleteHandler(folder, permanentBackups, permanentWals, useSentinelTime)
 	tracelog.ErrorLogger.FatalOnError(err)
 
-	deleteHandler.HandleDeleteEverything(args, permanentBackups, confirmed)
+	permanentBackupNames := make([]string, 0, len(permanentBackups))
+	for backup, isPerm := range permanentBackups {
+		if isPerm {
+			permanentBackupNames = append(permanentBackupNames, backup.Name)
+		}
+	}
+	deleteHandler.HandleDeleteEverything(args, permanentBackupNames, confirmed)
 }
 
 func runDeleteTarget(cmd *cobra.Command, args []string) {
-	folder, err := internal.ConfigureFolder()
-	tracelog.ErrorLogger.FatalOnError(err)
+	folder := configureFolder()
 
 	permanentBackups, permanentWals := postgres.GetPermanentBackupsAndWals(folder)
 
@@ -119,8 +131,7 @@ func runDeleteTarget(cmd *cobra.Command, args []string) {
 }
 
 func runDeleteGarbage(cmd *cobra.Command, args []string) {
-	folder, err := internal.ConfigureFolder()
-	tracelog.ErrorLogger.FatalOnError(err)
+	folder := configureFolder()
 
 	permanentBackups, permanentWals := postgres.GetPermanentBackupsAndWals(folder)
 
@@ -129,6 +140,16 @@ func runDeleteGarbage(cmd *cobra.Command, args []string) {
 
 	err = deleteHandler.HandleDeleteGarbage(args, confirmed)
 	tracelog.ErrorLogger.FatalOnError(err)
+}
+
+func configureFolder() storage.Folder {
+	multiSt, err := internal.ConfigureMultiStorage(true)
+	tracelog.ErrorLogger.FatalfOnError("Failed to configure multi-storage: %v", err)
+
+	rootFolder, err := multistorage.UseAllAliveStorages(multiSt.RootFolder())
+	tracelog.InfoLogger.Printf("Backup to delete will be searched in storages: %v", multistorage.UsedStorages(rootFolder))
+	tracelog.ErrorLogger.FatalOnError(err)
+	return multistorage.SetPolicies(rootFolder, policies.UniteAllStorages)
 }
 
 func DeleteGarbageArgsValidator(cmd *cobra.Command, args []string) error {
@@ -141,6 +162,7 @@ func init() {
 
 	deleteTargetCmd.Flags().StringVar(
 		&deleteTargetUserData, internal.DeleteTargetUserDataFlag, "", internal.DeleteTargetUserDataDescription)
+	deleteRetainCmd.Flags().StringP(afterFlag, "a", "", "Set the time after which retain backups")
 
 	deleteCmd.AddCommand(deleteRetainCmd, deleteBeforeCmd, deleteEverythingCmd, deleteTargetCmd, deleteGarbageCmd)
 	deleteCmd.PersistentFlags().BoolVar(&confirmed, internal.ConfirmFlag, false, "Confirms backup deletion")

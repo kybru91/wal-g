@@ -3,8 +3,8 @@ package gp
 import (
 	"github.com/spf13/cobra"
 	"github.com/wal-g/tracelog"
-	"github.com/wal-g/wal-g/internal"
 	"github.com/wal-g/wal-g/internal/databases/greenplum"
+	"github.com/wal-g/wal-g/internal/multistorage/policies"
 	"github.com/wal-g/wal-g/utility"
 )
 
@@ -19,9 +19,9 @@ var (
 		Short: restorePointListShortDescription, // TODO : improve description
 		Args:  cobra.NoArgs,
 		Run: func(cmd *cobra.Command, args []string) {
-			folder, err := internal.ConfigureFolder()
+			rootFolder, err := getMultistorageRootFolder(true, policies.UniteAllStorages)
 			tracelog.ErrorLogger.FatalOnError(err)
-			greenplum.HandleRestorePointList(folder.GetSubFolder(utility.BaseBackupPath), pretty, jsonOutput)
+			greenplum.HandleRestorePointList(rootFolder.GetSubFolder(utility.BaseBackupPath), pretty, jsonOutput)
 		},
 	}
 )

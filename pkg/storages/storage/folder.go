@@ -5,9 +5,8 @@ import (
 	"fmt"
 	"io"
 	"path"
+	"path/filepath"
 	"strings"
-
-	"github.com/wal-g/tracelog"
 )
 
 //go:generate mockery --name Folder
@@ -18,6 +17,7 @@ type Folder interface {
 	GetPath() string
 
 	// ListFolder lists the folder and provides nested objects and folders. Objects must be with relative paths.
+	// If the folder doesn't exist, empty objects and subFolders must be returned without any error.
 	ListFolder() (objects []Object, subFolders []Folder, err error)
 
 	// DeleteObjects deletes objects from the storage if they exist.
@@ -43,45 +43,22 @@ type Folder interface {
 	// CopyObject copies an object from one place inside the folder to the other. Both paths must be relative. This is
 	// an error if the source object doesn't exist.
 	CopyObject(srcPath string, dstPath string) error
-}
 
-type HashableFolder interface {
-	Folder
-	Hash() Hash
-}
+	Validate() error
 
-type Hash uint64
-
-func DeleteObjectsWhere(folder Folder, confirm bool, objFilter func(object1 Object) bool, folderFilter func(name string) bool) error {
-	relativePathObjects, err := ListFolderRecursivelyWithFilter(folder, folderFilter)
-	if err != nil {
-		return err
-	}
-	filteredRelativePaths := make([]string, 0)
-	tracelog.InfoLogger.Println("Objects in folder:")
-	for _, object := range relativePathObjects {
-		if objFilter(object) {
-			tracelog.InfoLogger.Println("\twill be deleted: " + object.GetName())
-			filteredRelativePaths = append(filteredRelativePaths, object.GetName())
-		} else {
-			tracelog.DebugLogger.Println("\tskipped: " + object.GetName())
-		}
-	}
-	if len(filteredRelativePaths) == 0 {
-		return nil
-	}
-	if confirm {
-		return folder.DeleteObjects(filteredRelativePaths)
-	}
-	tracelog.InfoLogger.Println("Dry run, nothing were deleted")
-	return nil
+	// Sets versioning setting. If versioning is disabled on server, sets it to disabled.
+	// Default versioning is set according to server setting.
+	SetVersioningEnabled(enable bool)
 }
 
 func ListFolderRecursively(folder Folder) (relativePathObjects []Object, err error) {
 	return ListFolderRecursivelyWithFilter(folder, func(string) bool { return true })
 }
 
-func ListFolderRecursivelyWithFilter(folder Folder, folderSelector func(path string) bool) (relativePathObjects []Object, err error) {
+func ListFolderRecursivelyWithFilter(
+	folder Folder,
+	folderSelector func(path string) bool,
+) (relativePathObjects []Object, err error) {
 	queue := make([]Folder, 0)
 	queue = append(queue, folder)
 	for len(queue) > 0 {
@@ -89,7 +66,7 @@ func ListFolderRecursivelyWithFilter(folder Folder, folderSelector func(path str
 		queue = queue[1:]
 		objects, subFolders, err := subFolder.ListFolder()
 		folderPrefix := strings.TrimPrefix(subFolder.GetPath(), folder.GetPath())
-		relativePathObjects = append(relativePathObjects, addPrefixToNames(objects, folderPrefix)...)
+		relativePathObjects = append(relativePathObjects, prependPaths(objects, folderPrefix)...)
 		if err != nil {
 			return nil, err
 		}
@@ -99,11 +76,14 @@ func ListFolderRecursivelyWithFilter(folder Folder, folderSelector func(path str
 	return relativePathObjects, nil
 }
 
-func addPrefixToNames(objects []Object, folderPrefix string) []Object {
+func prependPaths(objects []Object, folderPrefix string) []Object {
 	relativePathObjects := make([]Object, len(objects))
 	for i, object := range objects {
-		relativePath := path.Join(folderPrefix, object.GetName())
-		relativePathObjects[i] = NewLocalObject(relativePath, object.GetLastModified(), object.GetSize())
+		relativePathObjects[i] = NewLocalObject(
+			path.Join(folderPrefix, object.GetName()),
+			object.GetLastModified(),
+			object.GetSize(),
+		)
 	}
 	return relativePathObjects
 }
@@ -133,7 +113,7 @@ func ListFolderRecursivelyWithPrefix(folder Folder, prefix string) (relativePath
 		}
 		for _, obj := range objects {
 			if obj.GetName() == fileName {
-				return addPrefixToNames([]Object{obj}, dirName), nil
+				return prependPaths([]Object{obj}, dirName), nil
 			}
 		}
 	}
@@ -143,5 +123,94 @@ func ListFolderRecursivelyWithPrefix(folder Folder, prefix string) (relativePath
 	if err != nil {
 		return nil, fmt.Errorf("can't list folder %q: %w", prefix, err)
 	}
-	return addPrefixToNames(objects, prefix), nil
+	return prependPaths(objects, prefix), nil
+}
+
+func Glob(folder Folder, pattern string) (objectPaths []string, folderPaths []string, err error) {
+	objectPaths = make([]string, 0)
+	folderPaths = make([]string, 0)
+
+	if pattern == "/" {
+		return objectPaths, append(folderPaths, pattern), nil
+	}
+	pattern = strings.TrimLeft(pattern, "/")
+
+	type queueItem struct {
+		folder  Folder
+		pattern string
+	}
+	queue := make([]queueItem, 0)
+	queue = append(queue, queueItem{folder: folder, pattern: pattern})
+	rootPath := folder.GetPath()
+
+	for len(queue) > 0 {
+		current := queue[0]
+		queue = queue[1:]
+
+		patternParts := strings.Split(current.pattern, "/")
+		patternPart := patternParts[0]
+		isLast := len(patternParts) == 1 || (len(patternParts) == 2 && patternParts[1] == "")
+
+		folderPath := current.folder.GetPath()
+		objects, subfolders, err := current.folder.ListFolder()
+		if err != nil {
+			return nil, nil, err
+		}
+		matchedSubfolders, err := filterFoldersWithGlobPattern(subfolders, patternPart)
+		if err != nil {
+			return nil, nil, err
+		}
+		for _, matchedSubfolder := range matchedSubfolders {
+			if isLast {
+				folderPaths = append(folderPaths, strings.TrimPrefix(matchedSubfolder.GetPath(), rootPath))
+			} else {
+				queue = append(queue, queueItem{
+					folder:  matchedSubfolder,
+					pattern: strings.TrimPrefix(current.pattern, patternPart+"/"),
+				})
+			}
+		}
+
+		if !isLast {
+			continue
+		}
+		matchedObjects, err := filterObjectsWithGlobPattern(objects, patternPart)
+		if err != nil {
+			return nil, nil, err
+		}
+		for _, matchedObject := range matchedObjects {
+			objectPaths = append(objectPaths, strings.TrimPrefix(folderPath+matchedObject.GetName(), rootPath))
+		}
+	}
+	return objectPaths, folderPaths, nil
+}
+
+func filterObjectsWithGlobPattern(objects []Object, pattern string) ([]Object, error) {
+	result := make([]Object, 0)
+	for _, object := range objects {
+		objectName := object.GetName()
+		matched, err := filepath.Match(pattern, objectName)
+		if err != nil {
+			return nil, err
+		}
+		if matched {
+			result = append(result, object)
+		}
+	}
+	return result, nil
+}
+
+func filterFoldersWithGlobPattern(folders []Folder, pattern string) ([]Folder, error) {
+	result := make([]Folder, 0)
+	for _, folder := range folders {
+		folderName := filepath.Base(folder.GetPath())
+		matched, err := filepath.Match(pattern, folderName)
+		if err != nil {
+			return nil, err
+		}
+		if matched {
+			result = append(result, folder)
+		}
+	}
+	return result, nil
 }

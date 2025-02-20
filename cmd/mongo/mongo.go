@@ -10,6 +10,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/wal-g/tracelog"
 	"github.com/wal-g/wal-g/internal"
+	conf "github.com/wal-g/wal-g/internal/config"
 )
 
 var dbShortDescription = "MongoDB backup tool"
@@ -26,7 +27,7 @@ var cmd = &cobra.Command{
 	PersistentPreRun: func(cmd *cobra.Command, args []string) {
 		err := internal.AssertRequiredSettingsSet()
 		tracelog.ErrorLogger.FatalOnError(err)
-		err = internal.ConfigureAndRunDefaultWebServer()
+		err = conf.ConfigureAndRunDefaultWebServer()
 		tracelog.ErrorLogger.FatalOnError(err)
 	},
 }
@@ -40,8 +41,12 @@ func Execute() {
 	}
 }
 
+func GetCmd() *cobra.Command {
+	return cmd
+}
+
 func init() {
-	common.Init(cmd, internal.MONGO)
-	internal.AddTurboFlag(cmd)
-	internal.RequiredSettings[internal.MongoDBUriSetting] = true
+	common.Init(cmd, conf.MONGO)
+	conf.AddTurboFlag(cmd)
+	conf.RequiredSettings[conf.MongoDBUriSetting] = true
 }

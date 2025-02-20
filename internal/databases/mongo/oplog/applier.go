@@ -6,9 +6,9 @@ import (
 	"io"
 	"strings"
 
-	"github.com/mongodb/mongo-tools-common/db"
-	"github.com/mongodb/mongo-tools-common/txn"
-	"github.com/mongodb/mongo-tools-common/util"
+	"github.com/mongodb/mongo-tools/common/db"
+	"github.com/mongodb/mongo-tools/common/txn"
+	"github.com/mongodb/mongo-tools/common/util"
 	"github.com/wal-g/tracelog"
 	"github.com/wal-g/wal-g/internal/databases/mongo/client"
 	"github.com/wal-g/wal-g/internal/databases/mongo/models"
@@ -90,7 +90,7 @@ func (ap *DBApplier) Apply(ctx context.Context, opr models.Oplog) error {
 		return fmt.Errorf("can not unmarshal oplog entry: %w", err)
 	}
 
-	if err := ap.shouldSkip(op.Operation, op.Namespace); err != nil {
+	if err := ap.shouldSkip(&op); err != nil {
 		tracelog.DebugLogger.Printf("skipping op %+v due to: %+v", op, err)
 		return nil
 	}
@@ -101,9 +101,9 @@ func (ap *DBApplier) Apply(ctx context.Context, opr models.Oplog) error {
 	}
 
 	if meta.IsTxn() {
-		err = ap.handleTxnOp(ctx, meta, op)
+		err = ap.handleTxnOp(ctx, meta, &op)
 	} else {
-		err = ap.handleNonTxnOp(ctx, op)
+		err = ap.handleNonTxnOp(ctx, &op)
 	}
 
 	if err != nil {
@@ -123,13 +123,26 @@ func (ap *DBApplier) Close(ctx context.Context) error {
 	return nil
 }
 
-func (ap *DBApplier) shouldSkip(op, ns string) error {
-	if op == "n" {
+func (ap *DBApplier) shouldSkip(oplog *db.Oplog) error {
+	if oplog.Namespace == "n" {
 		return fmt.Errorf("noop op")
 	}
 
-	// sharded clusters are not supported yet
-	if strings.HasPrefix(ns, "config.") {
+	if oplog.Operation == "c" && len(oplog.Object) > 0 {
+		if oplog.Object[0].Key == "startIndexBuild" ||
+			oplog.Object[0].Key == "abortIndexBuild" {
+			/* See
+			https://github.com/mongodb/docs/blob/37910658a80979a82ceabf792618d96976e1bfeb/source/core/index-creation.txt#L183
+			for startIndexBuild
+			and
+			https://github.com/mongodb/docs/blob/37910658a80979a82ceabf792618d96976e1bfeb/source/core/index-creation.txt#L202
+			for abortIndexBuild details
+			*/
+			return fmt.Errorf("%s operation is not supported in applyOps mode", oplog.Object[0].Key)
+		}
+	}
+
+	if !isOpAllowedInconfigDB(oplog) {
 		return fmt.Errorf("config database op")
 	}
 
@@ -156,18 +169,84 @@ func (ap *DBApplier) shouldIgnore(op string, err error) bool {
 	return false
 }
 
+var ConfigCollectionsToKeep = []string{
+	"chunks",
+	"collections",
+	"databases",
+	"settings",
+	"shards",
+	"tags",
+	"version",
+}
+
+var selectedNSSupportedCommands = map[string]struct{}{
+	"create":           {},
+	"drop":             {},
+	"createIndexes":    {},
+	"deleteIndex":      {},
+	"deleteIndexes":    {},
+	"dropIndex":        {},
+	"dropIndexes":      {},
+	"collMod":          {},
+	"commitIndexBuild": {},
+}
+
+func Index[S ~[]E, E comparable](s S, v E) int {
+	for i := range s {
+		if v == s[i] {
+			return i
+		}
+	}
+	return -1
+}
+
+func Contains[S ~[]E, E comparable](s S, v E) bool {
+	return Index(s, v) >= 0
+}
+
+func isOpAllowedInconfigDB(oplog *db.Oplog) bool {
+	coll, ok := strings.CutPrefix(oplog.Namespace, "config.")
+	if !ok {
+		return true // OK: not a "config" database. allow any ops
+	}
+
+	if Contains(ConfigCollectionsToKeep, coll) {
+		return true // OK: create/update/delete a doc
+	}
+
+	if coll != "$cmd" || len(oplog.Object) == 0 {
+		return false // other collections are not allowed
+	}
+
+	if len(oplog.Object) > 0 {
+		op := oplog.Object[0].Key
+		if op == "applyOps" {
+			return true // internal ops of applyOps are checked one by one later
+		}
+		if _, ok := selectedNSSupportedCommands[op]; ok {
+			s, _ := oplog.Object[0].Value.(string)
+			return Contains(ConfigCollectionsToKeep, s)
+		}
+	}
+
+	return false
+}
+
 // handleNonTxnOp tries to apply given oplog record.
-func (ap *DBApplier) handleNonTxnOp(ctx context.Context, op db.Oplog) error {
+//
+//nolint:gocyclo
+func (ap *DBApplier) handleNonTxnOp(ctx context.Context, op *db.Oplog) error {
 	if !ap.preserveUUID {
 		var err error
-		op, err = filterUUIDs(op)
+		_, err = filterUUIDs(op)
 		if err != nil {
 			return fmt.Errorf("can not filter UUIDs from op '%+v', error: %+v", op, err)
 		}
 	}
 
 	// TODO: wait for index building
-	if op.Operation == "c" && op.Object[0].Key == "commitIndexBuild" {
+	// TODO: if we wait for index building, we can stop ignoring a BackgroundOperation... error in DropIndexes
+	if op.Operation == "c" && len(op.Object) > 0 && op.Object[0].Key == "commitIndexBuild" {
 		collName, indexes, err := indexSpecFromCommitIndexBuilds(op)
 		if err != nil {
 			return NewOpHandleError(op, err)
@@ -175,29 +254,33 @@ func (ap *DBApplier) handleNonTxnOp(ctx context.Context, op db.Oplog) error {
 		dbName, _ := util.SplitNamespace(op.Namespace)
 		return ap.db.CreateIndexes(ctx, dbName, collName, indexes)
 	}
-	if op.Operation == "c" && op.Object[0].Key == "createIndexes" {
+	if op.Operation == "c" && len(op.Object) > 0 && op.Object[0].Key == "createIndexes" {
 		collName, indexes, err := indexSpecsFromCreateIndexes(op)
 		if err != nil {
-			return NewOpHandleError(op, err)
+			return NewOpHandleError(*op, err)
 		}
 		dbName, _ := util.SplitNamespace(op.Namespace)
 		return ap.db.CreateIndexes(ctx, dbName, collName,
 			[]client.IndexDocument{indexes})
 	}
+	if op.Operation == "c" && len(op.Object) > 0 && op.Object[0].Key == "dropIndexes" {
+		dbName, _ := util.SplitNamespace(op.Namespace)
+		return ap.db.DropIndexes(ctx, dbName, op.Object)
+	}
 
-	//tracelog.DebugLogger.Printf("applying op: %+v", op)
+	//tracelog.DebugLogger.Printf("applying op: %+v", *op)
 	if err := ap.db.ApplyOp(ctx, op); err != nil {
 		// we ignore some errors (for example 'duplicate key error')
 		// TODO: check after TOOLS-2041
 		if !ap.shouldIgnore(op.Operation, err) {
-			return NewOpHandleError(op, err)
+			return NewOpHandleError(*op, err)
 		}
-		tracelog.WarningLogger.Printf("apply error is skipped: %+v\nop:\n%+v", err, op)
+		tracelog.WarningLogger.Printf("apply error is skipped: %+v\nop:\n%+v", err, *op)
 	}
 	return nil
 }
 
-func indexSpecsFromCreateIndexes(op db.Oplog) (string, client.IndexDocument, error) {
+func indexSpecsFromCreateIndexes(op *db.Oplog) (string, client.IndexDocument, error) {
 	index := client.IndexDocument{Options: bson.M{}}
 	var collName string
 	var elem bson.E
@@ -221,7 +304,7 @@ func indexSpecsFromCreateIndexes(op db.Oplog) (string, client.IndexDocument, err
 	return collName, index, nil
 }
 
-func indexSpecFromCommitIndexBuilds(op db.Oplog) (string, []client.IndexDocument, error) {
+func indexSpecFromCommitIndexBuilds(op *db.Oplog) (string, []client.IndexDocument, error) {
 	var collName string
 	var ok bool
 	var elemE bson.E
@@ -249,8 +332,9 @@ func indexSpecFromCommitIndexBuilds(op db.Oplog) (string, []client.IndexDocument
 				if !ok {
 					return "", nil, NewTypeAssertionError("bson.D", fmt.Sprintf("indexes[%d]", i), elemE.Value)
 				}
-				for i := range elements {
-					elemE = elements[i]
+
+				for j := range elements {
+					elemE = elements[j]
 					if elemE.Key == "key" {
 						if indexSpecs[i].Key, ok = elemE.Value.(bson.D); !ok {
 							return "", nil, NewTypeAssertionError("bson.D", "key", elemE.Value)
@@ -269,13 +353,13 @@ func indexSpecFromCommitIndexBuilds(op db.Oplog) (string, []client.IndexDocument
 
 // handleTxnOp handles oplog record with transaction attributes.
 // TODO: unit test
-func (ap *DBApplier) handleTxnOp(ctx context.Context, meta txn.Meta, op db.Oplog) error {
+func (ap *DBApplier) handleTxnOp(ctx context.Context, meta txn.Meta, op *db.Oplog) error {
 	if meta.IsAbort() {
 		if err := ap.txnBuffer.PurgeTxn(meta); err != nil {
 			return fmt.Errorf("can not clean txn buffer after rollback cmd: %w", err)
 		}
 	}
-	if err := ap.txnBuffer.AddOp(meta, op); err != nil {
+	if err := ap.txnBuffer.AddOp(meta, *op); err != nil {
 		return fmt.Errorf("can not append command to txn buffer: %w", err)
 	}
 
@@ -302,7 +386,7 @@ func (ap *DBApplier) applyTxn(ctx context.Context, meta txn.Meta) error {
 			if !ok {
 				return nil
 			}
-			if err := ap.handleNonTxnOp(ctx, op); err != nil {
+			if err := ap.handleNonTxnOp(ctx, &op); err != nil {
 				return err
 			}
 		case err, ok := <-errc:
