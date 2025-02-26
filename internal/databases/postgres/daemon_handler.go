@@ -14,7 +14,10 @@ import (
 	"github.com/pkg/errors"
 	"github.com/wal-g/tracelog"
 	"github.com/wal-g/wal-g/internal"
+	conf "github.com/wal-g/wal-g/internal/config"
 	"github.com/wal-g/wal-g/internal/daemon"
+	"github.com/wal-g/wal-g/internal/multistorage"
+	"github.com/wal-g/wal-g/pkg/storages/storage"
 	"github.com/wal-g/wal-g/utility"
 )
 
@@ -35,8 +38,7 @@ func (err SocketWriteFailedError) Error() string {
 }
 
 type DaemonOptions struct {
-	Uploader *WalUploader
-	Reader   internal.StorageFolderReader
+	SocketPath string
 }
 
 type SocketMessageHandler interface {
@@ -62,14 +64,16 @@ type ArchiveMessageHandler struct {
 }
 
 func (h *ArchiveMessageHandler) Handle(ctx context.Context, messageBody []byte) error {
-	tracelog.DebugLogger.Printf("wal file name: %s\n", string(messageBody))
+	walFileName := string(messageBody)
 
-	fullPath, err := getFullPath(path.Join("pg_wal", string(messageBody)))
+	tracelog.DebugLogger.Printf("wal file name: %s\n", walFileName)
+
+	fullPath, err := getFullPath(path.Join("pg_wal", walFileName))
 	if err != nil {
 		return err
 	}
 	tracelog.DebugLogger.Printf("starting wal-push: %s\n", fullPath)
-	pushTimeout, err := internal.GetDurationSetting(internal.PgDaemonWALUploadTimeout)
+	pushTimeout, err := conf.GetDurationSetting(conf.PgDaemonWALUploadTimeout)
 	if err != nil {
 		return err
 	}
@@ -99,13 +103,15 @@ func (h *WalFetchMessageHandler) Handle(_ context.Context, messageBody []byte) e
 	if len(args) != 2 {
 		return fmt.Errorf("wal-fetch incorrect arguments count")
 	}
-	fullPath, err := getFullPath(args[1])
+	walFileName := args[0]
+	location := args[1]
+	fullPath, err := getFullPath(location)
 	if err != nil {
 		return err
 	}
 	tracelog.DebugLogger.Printf("starting wal-fetch: %v -> %v\n", args[0], fullPath)
 
-	err = HandleWALFetch(h.reader, args[0], fullPath, DaemonPrefetcher{})
+	err = HandleWALFetch(h.reader, walFileName, fullPath, DaemonPrefetcher{})
 	if _, isArchNonExistErr := err.(internal.ArchiveNonExistenceError); isArchNonExistErr {
 		tracelog.WarningLogger.Printf("ArchiveNonExistenceError: %v\n", err.Error())
 		_, err = h.fd.Write(daemon.ArchiveNonExistenceType.ToBytes())
@@ -125,16 +131,29 @@ func (h *WalFetchMessageHandler) Handle(_ context.Context, messageBody []byte) e
 	return nil
 }
 
-func NewMessageHandler(messageType daemon.SocketMessageType, c net.Conn, opts DaemonOptions) SocketMessageHandler {
+func NewMessageHandler(
+	messageType daemon.SocketMessageType,
+	c net.Conn,
+	storage storage.Storage,
+) (SocketMessageHandler, error) {
 	switch messageType {
 	case daemon.CheckType:
-		return &CheckMessageHandler{c}
+		return &CheckMessageHandler{c}, nil
 	case daemon.WalPushType:
-		return &ArchiveMessageHandler{c, opts.Uploader}
+		walUploader, err := PrepareMultiStorageWalUploader(storage.RootFolder(), "")
+		if err != nil {
+			return nil, err
+		}
+		return &ArchiveMessageHandler{c, walUploader}, nil
 	case daemon.WalFetchType:
-		return &WalFetchMessageHandler{c, opts.Reader}
+		folderReader, err := internal.PrepareMultiStorageFolderReader(storage.RootFolder(), "")
+		if err != nil {
+			return nil, err
+		}
+
+		return &WalFetchMessageHandler{c, folderReader}, nil
 	default:
-		return nil
+		return nil, nil
 	}
 }
 
@@ -169,14 +188,14 @@ func (r SocketMessageReader) Next() (messageType daemon.SocketMessageType, messa
 }
 
 // HandleDaemon is invoked to perform daemon mode
-func HandleDaemon(options DaemonOptions, pathToSocket string) {
-	if _, err := os.Stat(pathToSocket); err == nil {
-		err = os.Remove(pathToSocket)
+func HandleDaemon(options DaemonOptions) {
+	if _, err := os.Stat(options.SocketPath); err == nil {
+		err = os.Remove(options.SocketPath)
 		if err != nil {
 			tracelog.ErrorLogger.Fatal("Failed to remove socket file:", err)
 		}
 	}
-	l, err := net.Listen("unix", pathToSocket)
+	l, err := net.Listen("unix", options.SocketPath)
 	if err != nil {
 		tracelog.ErrorLogger.Fatal("Error on listening socket:", err)
 	}
@@ -185,39 +204,37 @@ func HandleDaemon(options DaemonOptions, pathToSocket string) {
 	defer sdNotifyTicker.Stop()
 	go SendSdNotify(sdNotifyTicker.C)
 
+	conf.SetupSignalListener()
+
+	multiSt, err := internal.ConfigureMultiStorage(true)
+	defer utility.LoggedClose(multiSt, "close multi-storage")
+	if err != nil {
+		tracelog.ErrorLogger.Fatal("configure multi-storage: %w", err)
+		return
+	}
+
 	for {
 		fd, err := l.Accept()
 		if err != nil {
 			tracelog.ErrorLogger.Fatal("Failed to accept, err:", err)
 		}
-		go Listen(context.Background(), fd, options)
+		go ProcessConnection(context.Background(), fd, multiSt)
 	}
 }
 
-// Listen is used for listening connection and processing messages
-func Listen(ctx context.Context, c net.Conn, opts DaemonOptions) {
+// ProcessConnection is used for listening connection and processing messages
+func ProcessConnection(ctx context.Context, c net.Conn, multiSt *multistorage.Storage) {
 	defer utility.LoggedClose(c, fmt.Sprintf("Failed to close connection with %s \n", c.RemoteAddr()))
 	messageReader := NewMessageReader(c)
 	for {
 		messageType, messageBody, err := messageReader.Next()
 		if err != nil {
-			tracelog.ErrorLogger.Printf("Failed to read message from %s, err: %v\n", c.RemoteAddr(), err)
-			_, err = c.Write(daemon.ErrorType.ToBytes())
-			tracelog.ErrorLogger.PrintOnError(err)
+			failAndLogError(c, fmt.Errorf("read message from %s, err: %v", c.RemoteAddr(), err))
 			return
 		}
-		messageHandler := NewMessageHandler(messageType, c, opts)
-		if messageHandler == nil {
-			tracelog.ErrorLogger.Printf("Unexpected message type: %s", string(messageType))
-			_, err = c.Write(daemon.ErrorType.ToBytes())
-			tracelog.ErrorLogger.PrintOnError(err)
-			return
-		}
-		err = messageHandler.Handle(ctx, messageBody)
+		err = handleMessage(ctx, messageType, messageBody, c, multiSt)
 		if err != nil {
-			tracelog.ErrorLogger.Println("Failed to handle message:", err)
-			_, err = c.Write(daemon.ErrorType.ToBytes())
-			tracelog.ErrorLogger.PrintOnError(err)
+			failAndLogError(c, err)
 			return
 		}
 		if messageType == daemon.WalPushType {
@@ -225,8 +242,38 @@ func Listen(ctx context.Context, c net.Conn, opts DaemonOptions) {
 			return
 		}
 		if messageType == daemon.WalFetchType {
+			tracelog.DebugLogger.Printf("successfully fetched: %s\n", string(messageBody))
 			return
 		}
+	}
+}
+
+func handleMessage(
+	ctx context.Context,
+	messageType daemon.SocketMessageType,
+	messageBody []byte,
+	conn net.Conn,
+	multiSt *multistorage.Storage,
+) error {
+	messageHandler, err := NewMessageHandler(messageType, conn, multiSt)
+	if err != nil {
+		return fmt.Errorf("init handler for message type %s: %v", string(messageType), err)
+	}
+	if messageHandler == nil {
+		return fmt.Errorf("unexpected message type: %s", string(messageType))
+	}
+	err = messageHandler.Handle(ctx, messageBody)
+	if err != nil {
+		return fmt.Errorf("handle message: %w", err)
+	}
+	return nil
+}
+
+func failAndLogError(c net.Conn, err error) {
+	tracelog.ErrorLogger.Printf("Message loop failure: %v", err)
+	_, err = c.Write(daemon.ErrorType.ToBytes())
+	if err != nil {
+		tracelog.ErrorLogger.Printf("Sending error response failed: %v", err)
 	}
 }
 
@@ -238,7 +285,7 @@ func SendSdNotify(c <-chan time.Time) {
 }
 
 func SdNotify(state string) error {
-	socketName, ok := internal.GetSetting(internal.SystemdNotifySocket)
+	socketName, ok := conf.GetSetting(conf.SystemdNotifySocket)
 	if !ok {
 		return nil
 	}
@@ -258,7 +305,7 @@ func SdNotify(state string) error {
 }
 
 func getFullPath(relativePath string) (string, error) {
-	PgDataSettingString, ok := internal.GetSetting(internal.PgDataSetting)
+	PgDataSettingString, ok := conf.GetSetting(conf.PgDataSetting)
 	if !ok {
 		return "", fmt.Errorf("PGDATA is not set in the conf")
 	}

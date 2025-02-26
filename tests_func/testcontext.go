@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -75,7 +76,7 @@ type AuxData struct {
 	OplogPushEnabled   bool
 }
 
-type MongoVersion struct {
+type DBVersion struct {
 	Major string
 	Full  string
 }
@@ -86,11 +87,13 @@ type TestContext struct {
 	Env                map[string]string
 	Context            context.Context
 	AuxData            AuxData
-	Version            MongoVersion
+	Version            DBVersion
 	PreviousBackupTime time.Time
 }
 
-func CreateTestContex(database string) (tctx *TestContext, err error) {
+func CreateTestContext(database string) (tctx *TestContext, err error) {
+	environ := utils.ParseEnvLines(os.Environ())
+
 	envFilePath := path.Join(stagingDir, envFile)
 
 	Env["ENV_FILE"] = envFilePath // set ENV_FILE for docker-compose
@@ -102,7 +105,7 @@ func CreateTestContex(database string) (tctx *TestContext, err error) {
 	var env map[string]string
 
 	if !EnvExists(envFilePath) {
-		env, err = SetupNewEnv(Env, envFilePath, stagingDir)
+		env, err = SetupNewEnv(Env, environ, envFilePath, stagingDir)
 		if err != nil {
 			return nil, err
 		}
@@ -113,16 +116,29 @@ func CreateTestContex(database string) (tctx *TestContext, err error) {
 		}
 	}
 
-	environ := utils.ParseEnvLines(os.Environ())
+	var version DBVersion
+	if database == "mongodb" {
+		version = DBVersion{
+			Major: environ["MONGO_MAJOR"],
+			Full:  environ["MONGO_VERSION"],
+		}
+	} else if database == "redis" {
+		full := environ["REDIS_VERSION"]
+		parts := strings.Split(full, ".")
+		major := strings.Join(parts[:2], ".")
+		version = DBVersion{
+			Major: major,
+			Full:  full,
+		}
+	} else {
+		return nil, fmt.Errorf("database %s is not expected here", database)
+	}
 
 	tctx = &TestContext{
 		EnvFilePath: envFilePath,
 		Context:     context.Background(),
-		Version: MongoVersion{
-			Major: environ["MONGO_MAJOR"],
-			Full:  environ["MONGO_VERSION"],
-		},
-		Env: env,
+		Version:     version,
+		Env:         env,
 	}
 	return tctx, tctx.LoadEnv()
 }
@@ -150,17 +166,29 @@ func (tctx *TestContext) LoadEnv() (err error) {
 }
 
 func GetRedisCtlFromTestContext(tctx *TestContext, hostName string) (*helpers.RedisCtl, error) {
+	return GetRedisCtlFromTestContextTyped(tctx, hostName, "")
+}
+
+func GetRedisCtlFromTestContextTyped(tctx *TestContext, hostName, configType string) (*helpers.RedisCtl, error) {
 	host := tctx.ContainerFQDN(hostName)
 	port, err := strconv.Atoi(tctx.Env["REDIS_EXPOSE_PORT"])
 	if err != nil {
 		return nil, err
 	}
+	confPath := tctx.Env["WALG_CONF_PATH"]
+	if configType != "" {
+		ext := filepath.Ext(confPath)
+		confPath = strings.Join([]string{strings.TrimSuffix(confPath, ext), configType, ext}, "")
+	}
 	return helpers.NewRedisCtl(
 		tctx.Context,
-		host,
-		port,
-		tctx.Env["REDIS_PASSWORD"],
-		tctx.Env["WALG_CLIENT_PATH"],
-		tctx.Env["WALG_CONF_PATH"],
+		helpers.RedisCtlArgs{
+			BinPath:  tctx.Env["WALG_CLIENT_PATH"],
+			ConfPath: confPath,
+			Host:     host,
+			Port:     port,
+			Username: tctx.Env["REDIS_USERNAME"],
+			Password: tctx.Env["REDIS_PASSWORD"],
+		},
 	)
 }

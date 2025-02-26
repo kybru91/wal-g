@@ -26,6 +26,7 @@ type Handler struct {
 }
 
 type HandlerConfig struct {
+	PreserveInSource         bool
 	FailOnFirstErr           bool
 	Concurrency              int
 	AppearanceChecks         uint
@@ -37,18 +38,18 @@ func NewHandler(
 	fileLister FileLister,
 	cfg *HandlerConfig,
 ) (*Handler, error) {
-	sourceFolder, err := exec.ConfigureStorage(sourceStorage)
+	source, err := exec.ConfigureStorage(sourceStorage)
 	if err != nil {
 		return nil, fmt.Errorf("configure source storage folder: %w", err)
 	}
-	targetFolder, err := exec.ConfigureStorage(targetStorage)
+	target, err := exec.ConfigureStorage(targetStorage)
 	if err != nil {
 		return nil, fmt.Errorf("configure target storage folder: %w", err)
 	}
 
 	return &Handler{
-		source:          sourceFolder,
-		target:          targetFolder,
+		source:          source.RootFolder(),
+		target:          target.RootFolder(),
 		fileLister:      fileLister,
 		cfg:             cfg,
 		fileStatuses:    new(sync.Map),
@@ -318,6 +319,9 @@ func (h *Handler) waitFile(job transferJob) (newJob *transferJob, err error) {
 
 	if appeared {
 		h.fileStatuses.Store(job.key.filePath, transferStatusAppeared)
+		if h.cfg.PreserveInSource {
+			return nil, nil
+		}
 		job.key.jobType = jobTypeDelete
 		newJob = &job
 		return newJob, nil

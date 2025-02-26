@@ -9,14 +9,15 @@ on:
 
 env:
   CACHE_FOLDER: ~/docker-images-${{ github.sha }}
-  CACHE_FILE_UBUNTU: ~/docker-images-${{ github.sha }}/wal-g_ubuntu.tgz
+  CACHE_FILE_UBUNTU_18_04: ~/docker-images-${{ github.sha }}/wal-g_ubuntu-18.04.tgz
+  CACHE_FILE_UBUNTU_20_04: ~/docker-images-${{ github.sha }}/wal-g_ubuntu-20.04.tgz
   CACHE_FILE_GOLANG: ~/docker-images-${{ github.sha }}/wal-g_golang.tgz
   CACHE_FILE_DOCKER_PREFIX: ~/docker-images-${{ github.sha }}/docker_prefix.tgz
   IMAGE: wal-g/docker_prefix
-  IMAGE_UBUNTU: wal-g/ubuntu
   IMAGE_GOLANG: wal-g/golang
   IMAGES_CACHE_KEY: docker-images-${{ github.sha }}
-  GO_VERSION: "1.20.5" # until this will be resolved https://github.com/golang/go/issues/61431
+  GO_VERSION: "1.22.8"
+  LIBSODIUM_VERSION: "1.0.20"
 
 jobs:
   buildimages:
@@ -26,11 +27,12 @@ jobs:
       #  use cache to pass docker images to the test jobs
       - name: Docker images caching
         id: cache-images
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: |
             ${{ env.CACHE_FILE_DOCKER_PREFIX }}
-            ${{ env.CACHE_FILE_UBUNTU }}
+            ${{ env.CACHE_FILE_UBUNTU_18_04 }}
+            ${{ env.CACHE_FILE_UBUNTU_20_04 }}
             ${{ env.CACHE_FILE_GOLANG }}
           key: ${{ env.IMAGES_CACHE_KEY }}
 
@@ -40,11 +42,11 @@ jobs:
 
       - name: Check out code into the Go module directory
         if: steps.cache-images.outputs.cache-hit != 'true'
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Set up Go 1.x
         if: steps.cache-images.outputs.cache-hit != 'true'
-        uses: actions/setup-go@v4
+        uses: actions/setup-go@v5
         with:
           go-version: ${{ env.GO_VERSION }}
         id: go
@@ -53,10 +55,6 @@ jobs:
         if: steps.cache-images.outputs.cache-hit != 'true'
         run: |
           go get -v -t -d ./...
-          if [ -f Gopkg.toml ]; then
-           curl https://raw.githubusercontent.com/golang/dep/master/install.sh | sh
-           dep ensure
-          fi
 
       # build images
       - name: Build images
@@ -82,10 +80,10 @@ jobs:
         run: sudo apt-get install liblzo2-dev
 
       - name: Check out code into the Go module directory
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Set up Go 1.x
-        uses: actions/setup-go@v4
+        uses: actions/setup-go@v5
         with:
           go-version: ${{ env.GO_VERSION }}
         id: go
@@ -93,19 +91,16 @@ jobs:
       - name: Get dependencies
         run: |
           go get -v -t -d ./...
-          if [ -f Gopkg.toml ]; then
-           curl https://raw.githubusercontent.com/golang/dep/master/install.sh | sh
-           dep ensure
-          fi
 
       # load docker images
       - name: Load docker images
         id: cache-images
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: |
             ${{ env.CACHE_FILE_DOCKER_PREFIX }}
-            ${{ env.CACHE_FILE_UBUNTU }}
+            ${{ env.CACHE_FILE_UBUNTU_18_04 }}
+            ${{ env.CACHE_FILE_UBUNTU_20_04 }}
             ${{ env.CACHE_FILE_GOLANG }}
           key: ${{ env.IMAGES_CACHE_KEY }}
 

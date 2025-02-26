@@ -10,6 +10,8 @@ import (
 	"github.com/spf13/viper"
 	"github.com/wal-g/tracelog"
 	"github.com/wal-g/wal-g/internal"
+	conf "github.com/wal-g/wal-g/internal/config"
+	"github.com/wal-g/wal-g/internal/multistorage/policies"
 )
 
 const (
@@ -28,19 +30,22 @@ var (
 
 			greenplum.SetSegmentStoragePrefix(contentID)
 
-			uploader, err := internal.ConfigureUploader()
+			rootFolder, err := getMultistorageRootFolder(true, policies.TakeFirstStorage)
+			tracelog.ErrorLogger.FatalOnError(err)
+
+			uploader, err := internal.ConfigureUploaderToFolder(rootFolder)
 			tracelog.ErrorLogger.FatalOnError(err)
 
 			dataDirectory := args[0]
 
 			if deltaFromName == "" {
-				deltaFromName = viper.GetString(internal.DeltaFromNameSetting)
+				deltaFromName = viper.GetString(conf.DeltaFromNameSetting)
 			}
 			if deltaFromUserData == "" {
-				deltaFromUserData = viper.GetString(internal.DeltaFromUserDataSetting)
+				deltaFromUserData = viper.GetString(conf.DeltaFromUserDataSetting)
 			}
 			if userDataRaw == "" {
-				userDataRaw = viper.GetString(internal.SentinelUserDataSetting)
+				userDataRaw = viper.GetString(conf.SentinelUserDataSetting)
 			}
 
 			if deltaFromName == "" && deltaFromUserData == "" {
@@ -57,13 +62,12 @@ var (
 			verifyPageChecksums := false
 			storeAllCorruptBlocks := false
 			tarBallComposerType := postgres.RegularComposer
-			withoutFilesMetadata := false
 
 			arguments := postgres.NewBackupArguments(uploader, dataDirectory, utility.BaseBackupPath,
 				permanent, verifyPageChecksums,
 				fullBackup, storeAllCorruptBlocks,
 				tarBallComposerType, greenplum.NewSegDeltaBackupConfigurator(deltaBaseSelector),
-				userData, withoutFilesMetadata)
+				userData, viper.GetBool(conf.WithoutFilesMetadataSetting))
 
 			backupHandler, err := greenplum.NewSegBackupHandler(arguments)
 			tracelog.ErrorLogger.FatalOnError(err)

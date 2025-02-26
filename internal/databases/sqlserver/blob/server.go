@@ -16,6 +16,7 @@ import (
 	"github.com/wal-g/wal-g/utility"
 
 	"github.com/wal-g/wal-g/internal/compression"
+	conf "github.com/wal-g/wal-g/internal/config"
 	"github.com/wal-g/wal-g/internal/crypto"
 	"golang.org/x/xerrors"
 
@@ -36,6 +37,8 @@ const DefaultConcurrency = 8
 const BlockReadCacheSize = 16
 
 const MaxCacheBlockSize = 16 * 1024 * 1024 // 16M
+
+const InternalPingURL = "/__walg_g_ping__"
 
 type Server struct {
 	folder       storage.Folder
@@ -61,24 +64,24 @@ func NewServer(folder storage.Folder) (*Server, error) {
 	var err error
 	bs := new(Server)
 	bs.folder = folder
-	bs.certFile, err = internal.GetRequiredSetting(internal.SQLServerBlobCertFile)
+	bs.certFile, err = conf.GetRequiredSetting(conf.SQLServerBlobCertFile)
 	if err != nil {
 		return nil, err
 	}
-	bs.keyFile, err = internal.GetRequiredSetting(internal.SQLServerBlobKeyFile)
+	bs.keyFile, err = conf.GetRequiredSetting(conf.SQLServerBlobKeyFile)
 	if err != nil {
 		return nil, err
 	}
-	hostname, err := internal.GetRequiredSetting(internal.SQLServerBlobHostname)
+	hostname, err := conf.GetRequiredSetting(conf.SQLServerBlobHostname)
 	if err != nil {
 		return nil, err
 	}
-	downloadConcurrency, err := internal.GetMaxDownloadConcurrency()
+	downloadConcurrency, err := conf.GetMaxDownloadConcurrency()
 	if err != nil {
 		downloadConcurrency = DefaultConcurrency
 	}
 	bs.downloadSem = make(chan struct{}, downloadConcurrency)
-	uploadConcurrency, err := internal.GetMaxUploadConcurrency()
+	uploadConcurrency, err := conf.GetMaxUploadConcurrency()
 	if err != nil {
 		uploadConcurrency = DefaultConcurrency
 	}
@@ -149,7 +152,7 @@ func (bs *Server) RunBackground(ctx context.Context, cancel context.CancelFunc) 
 func (bs *Server) WaitReady(ctx context.Context, timeout time.Duration) error {
 	sctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	url := fmt.Sprintf("https://%s/", bs.endpoint)
+	url := fmt.Sprintf("https://%s%s", bs.endpoint, InternalPingURL)
 	c := http.Client{Timeout: 100 * time.Millisecond}
 	t := time.NewTicker(200 * time.Millisecond)
 	for {
@@ -186,7 +189,7 @@ func (bs *Server) Shutdown() error {
 }
 
 func (bs *Server) ServeHTTP(w http.ResponseWriter, req *http.Request) {
-	if _, ok := internal.GetSetting(internal.SQLServerBlobKeyFile); ok {
+	if _, ok := conf.GetSetting(conf.SQLServerBlobKeyFile); ok {
 		if req.Header.Get(ReqIDHeader) == "" {
 			req.Header.Set(ReqIDHeader, uuid.New().String())
 		}
@@ -206,6 +209,10 @@ func (bs *Server) ServeHTTP2(w http.ResponseWriter, req *http.Request) {
 			w.WriteHeader(http.StatusInternalServerError)
 		}
 	}()
+	if req.URL.Path == InternalPingURL {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
 	// default headers
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Content-Length", "0")
@@ -772,7 +779,7 @@ func (bs *Server) parseBytesRange(req *http.Request) (uint64, uint64, error) {
 }
 
 func (bs *Server) AcquireLock() (io.Closer, error) {
-	path, err := internal.GetRequiredSetting(internal.SQLServerBlobLockFile)
+	path, err := conf.GetRequiredSetting(conf.SQLServerBlobLockFile)
 	if err != nil {
 		return nil, err
 	}

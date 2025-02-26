@@ -1,22 +1,23 @@
 package greenplum
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/google/uuid"
 
-	"github.com/blang/semver"
 	"github.com/greenplum-db/gp-common-go-libs/cluster"
 	"github.com/greenplum-db/gp-common-go-libs/gplog"
-	"github.com/jackc/pgx"
+	"github.com/jackc/pgx/v5"
 	"github.com/wal-g/tracelog"
+
 	"github.com/wal-g/wal-g/internal"
+	conf "github.com/wal-g/wal-g/internal/config"
 	"github.com/wal-g/wal-g/internal/databases/postgres"
 	"github.com/wal-g/wal-g/utility"
 )
@@ -30,6 +31,7 @@ const (
 
 // BackupArguments holds all arguments parsed from cmd to this handler class
 type BackupArguments struct {
+	Uploader       internal.Uploader
 	isPermanent    bool
 	isFull         bool
 	userData       interface{}
@@ -88,7 +90,7 @@ type CurrBackupInfo struct {
 	startTime            time.Time
 	finishTime           time.Time
 	systemIdentifier     *uint64
-	gpVersion            semver.Version
+	gpVersion            Version
 	segmentsMetadata     map[string]PgSegmentSentinelDto
 	backupPidByContentID map[int]int
 	incrementCount       int
@@ -97,7 +99,7 @@ type CurrBackupInfo struct {
 type PrevBackupInfo struct {
 	name               string
 	sentinelDto        BackupSentinelDto
-	deltaBaseBackupIds map[int]string
+	deltaBaseBackupIDs map[int]string
 }
 
 // BackupHandler is the main struct which is handling the backup process
@@ -109,7 +111,6 @@ type BackupHandler struct {
 	prevBackupInfo PrevBackupInfo
 }
 
-// TODO: unit tests
 // buildBackupPushCommand builds a command to be executed on specific segment
 func (bh *BackupHandler) buildBackupPushCommand(contentID int) string {
 	segment := bh.globalCluster.ByContent[contentID][0]
@@ -138,7 +139,7 @@ func (bh *BackupHandler) buildBackupPushCommand(contentID int) string {
 		// actual arguments to be passed to the backup-push command
 		backupPushArgsLine,
 		// pass the config file location
-		fmt.Sprintf("--config=%s", internal.CfgFile),
+		fmt.Sprintf("--config=%s", conf.CfgFile),
 		// forward stdout and stderr to the log file
 		"&>>", formatSegmentLogPath(contentID),
 		// run in the background and get the launched process PID
@@ -155,7 +156,7 @@ func (bh *BackupHandler) addSegmentDeltaBaseArg(contentID int, args []string) []
 		return args
 	}
 
-	backupID, ok := bh.prevBackupInfo.deltaBaseBackupIds[contentID]
+	backupID, ok := bh.prevBackupInfo.deltaBaseBackupIDs[contentID]
 	if !ok {
 		tracelog.WarningLogger.Printf(
 			"unable to find the requested contentID %d in metadata of the base backup %s, "+
@@ -204,17 +205,10 @@ func (bh *BackupHandler) HandleBackupPush() {
 		bh.abortBackup()
 	}
 
-	// WAL-G will reconnect later
-	bh.disconnect()
-
 	// wait for segments to complete their backups
 	waitBackupsErr := bh.waitSegmentBackups()
 	if waitBackupsErr != nil {
 		tracelog.ErrorLogger.Printf("Segment backups wait error: %v", waitBackupsErr)
-	}
-	tracelog.ErrorLogger.FatalfOnError("Failed to connect to the greenplum master: %v",
-		bh.connect())
-	if waitBackupsErr != nil {
 		bh.abortBackup()
 	}
 
@@ -252,7 +246,8 @@ func (bh *BackupHandler) uploadRestorePointMetadata(restoreLSNs map[int]string) 
 		StartTime:        bh.currBackupInfo.startTime,
 		FinishTime:       bh.currBackupInfo.finishTime,
 		Hostname:         hostname,
-		GpVersion:        bh.currBackupInfo.gpVersion.String(),
+		GpVersion:        bh.currBackupInfo.gpVersion.Version.String(),
+		GpFlavor:         bh.currBackupInfo.gpVersion.Flavor.String(),
 		SystemIdentifier: bh.currBackupInfo.systemIdentifier,
 		LsnBySegment:     restoreLSNs,
 	}
@@ -389,17 +384,26 @@ func (bh *BackupHandler) pollSegmentStates() (map[int]SegCmdState, error) {
 func (bh *BackupHandler) checkPrerequisites() (err error) {
 	tracelog.InfoLogger.Println("Checking backup prerequisites")
 
-	if bh.currBackupInfo.gpVersion.Major >= 7 {
-		// GP7+ allows the non-exclusive backups
-		tracelog.InfoLogger.Println("Checking backup prerequisites: OK")
+	version := bh.currBackupInfo.gpVersion
+	if version.Flavor == Cloudberry ||
+		(version.Flavor == Greenplum && version.Major >= 7) {
+		// CB & GP7+ allows the non-exclusive backups
+		tracelog.InfoLogger.Println("Checking backup prerequisites: SKIP - non-exclusive backups used")
 		return nil
 	}
 
-	tracelog.InfoLogger.Println("Checking for the existing running backup...")
 	queryRunner, err := NewGpQueryRunner(bh.workers.Conn)
 	if err != nil {
 		return err
 	}
+
+	tracelog.InfoLogger.Println("Trying to acquire lock")
+	err = queryRunner.TryGetLock()
+	if err != nil {
+		return err
+	}
+	tracelog.InfoLogger.Println("Lock successfully acquired")
+
 	backupStatuses, err := queryRunner.IsInBackup()
 	if err != nil {
 		return err
@@ -413,9 +417,13 @@ func (bh *BackupHandler) checkPrerequisites() (err error) {
 	}
 
 	if len(isInBackupSegments) > 0 {
-		return fmt.Errorf("backup is already in progress on one or more segments: %v", isInBackupSegments)
+		tracelog.InfoLogger.Printf("backup is already in progress on one or more segments: %v", isInBackupSegments)
+		err = queryRunner.AbortBackup()
+		if err != nil {
+			return fmt.Errorf("closing old backups failed: %v", err)
+		}
 	}
-	tracelog.InfoLogger.Printf("No running backups were found")
+
 	tracelog.InfoLogger.Printf("Checking backup prerequisites: OK")
 	return nil
 }
@@ -430,6 +438,7 @@ func (bh *BackupHandler) uploadSentinel(sentinelDto BackupSentinelDto) (err erro
 	return internal.UploadSentinel(sentinelUploader, sentinelDto, bh.currBackupInfo.backupName)
 }
 
+// nolint:unused
 func (bh *BackupHandler) connect() (err error) {
 	tracelog.InfoLogger.Println("Connecting to Greenplum master.")
 	bh.workers.Conn, err = postgres.Connect()
@@ -438,48 +447,39 @@ func (bh *BackupHandler) connect() (err error) {
 
 func (bh *BackupHandler) disconnect() {
 	tracelog.InfoLogger.Println("Disconnecting from the Greenplum master.")
-	err := bh.workers.Conn.Close()
+	err := bh.workers.Conn.Close(context.TODO())
 	if err != nil {
 		tracelog.WarningLogger.Printf("Failed to disconnect: %v", err)
 	}
 }
 
-func getGpClusterInfo(conn *pgx.Conn) (globalCluster *cluster.Cluster, version semver.Version, systemIdentifier *uint64, err error) {
+func getGpClusterInfo(conn *pgx.Conn) (globalCluster *cluster.Cluster, version Version, systemIdentifier *uint64, err error) {
 	queryRunner, err := NewGpQueryRunner(conn)
 	if err != nil {
-		return globalCluster, semver.Version{}, nil, err
+		return globalCluster, Version{}, nil, err
 	}
 
 	versionStr, err := queryRunner.GetGreenplumVersion()
 	if err != nil {
-		return globalCluster, semver.Version{}, nil, err
+		return globalCluster, Version{}, nil, err
 	}
 	tracelog.InfoLogger.Printf("Greenplum version: %s", versionStr)
-	versionStart := strings.Index(versionStr, "(Greenplum Database ") + len("(Greenplum Database ")
-	versionEnd := strings.Index(versionStr, ")")
-	versionStr = versionStr[versionStart:versionEnd]
-	pattern := regexp.MustCompile(`\d+\.\d+\.\d+`)
-	threeDigitVersion := pattern.FindStringSubmatch(versionStr)[0]
-	semVer, err := semver.Make(threeDigitVersion)
+	version, err = parseGreenplumVersion(versionStr)
 	if err != nil {
-		return globalCluster, semver.Version{}, nil, err
+		return globalCluster, Version{}, nil, err
 	}
-
-	segConfigs, err := queryRunner.GetGreenplumSegmentsInfo(semVer)
+	segConfigs, err := queryRunner.GetGreenplumSegmentsInfo(version)
 	if err != nil {
-		return globalCluster, semver.Version{}, nil, err
+		return globalCluster, Version{}, nil, err
 	}
 	globalCluster = cluster.NewCluster(segConfigs)
 
-	return globalCluster, semVer, queryRunner.SystemIdentifier, nil
+	return globalCluster, version, queryRunner.SystemIdentifier, nil
 }
 
 // NewBackupHandler returns a backup handler object, which can handle the backup
 func NewBackupHandler(arguments BackupArguments) (bh *BackupHandler, err error) {
-	uploader, err := internal.ConfigureUploader()
-	if err != nil {
-		return nil, err
-	}
+	uploader := arguments.Uploader
 
 	conn, err := postgres.Connect()
 	if err != nil {
@@ -508,9 +508,10 @@ func NewBackupHandler(arguments BackupArguments) (bh *BackupHandler, err error) 
 }
 
 // NewBackupArguments creates a BackupArgument object to hold the arguments from the cmd
-func NewBackupArguments(isPermanent, isFull bool, userData interface{}, fwdArgs []SegmentFwdArg, logsDir string,
+func NewBackupArguments(uploader internal.Uploader, isPermanent, isFull bool, userData interface{}, fwdArgs []SegmentFwdArg, logsDir string,
 	segPollInterval time.Duration, segPollRetries int, deltaBaseSelector internal.BackupSelector) BackupArguments {
 	return BackupArguments{
+		Uploader:          uploader,
 		isPermanent:       isPermanent,
 		isFull:            isFull,
 		userData:          userData,
@@ -600,8 +601,10 @@ func (bh *BackupHandler) abortBackup() {
 
 func (bh *BackupHandler) terminateRunningBackups() error {
 	// Abort the non-finished exclusive backups on the segments.
-	// WAL-G in GP7+ uses the non-exclusive backups, that are terminated on connection close, so this is unnecessary.
-	if bh.currBackupInfo.gpVersion.Major >= 7 {
+	// WAL-G in CB&GP7+ uses the non-exclusive backups, that are terminated on connection close, so this is unnecessary.
+	version := bh.currBackupInfo.gpVersion
+	if version.Flavor == Cloudberry ||
+		(version.Flavor == Greenplum && version.Major >= 7) {
 		return nil
 	}
 
@@ -718,18 +721,18 @@ func (bh *BackupHandler) configureDeltaBackup() (err error) {
 		return err
 	}
 
-	bh.loadDeltaBaseBackupIds()
+	bh.loadDeltaBaseBackupIDs()
 
 	return nil
 }
 
-func (bh *BackupHandler) loadDeltaBaseBackupIds() {
-	bh.prevBackupInfo.deltaBaseBackupIds = make(map[int]string)
+func (bh *BackupHandler) loadDeltaBaseBackupIDs() {
+	bh.prevBackupInfo.deltaBaseBackupIDs = make(map[int]string)
 
 	for i := range bh.prevBackupInfo.sentinelDto.Segments {
 		backupID := bh.prevBackupInfo.sentinelDto.Segments[i].BackupID
 		contentID := bh.prevBackupInfo.sentinelDto.Segments[i].ContentID
-		bh.prevBackupInfo.deltaBaseBackupIds[contentID] = backupID
+		bh.prevBackupInfo.deltaBaseBackupIDs[contentID] = backupID
 	}
 }
 

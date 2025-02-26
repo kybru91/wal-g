@@ -9,6 +9,7 @@ import (
 
 	"github.com/pkg/errors"
 	"github.com/wal-g/tracelog"
+
 	"github.com/wal-g/wal-g/internal/multistorage"
 	"github.com/wal-g/wal-g/pkg/storages/storage"
 	"github.com/wal-g/wal-g/utility"
@@ -34,6 +35,17 @@ func SortTimedBackup(backups []TimedBackup) {
 
 func NewNoBackupsFoundError() NoBackupsFoundError {
 	return NoBackupsFoundError{errors.New("No backups found")}
+}
+
+func FilterOutNoBackupFoundError(err error, json bool) error {
+	if _, isNoBackupsErr := err.(NoBackupsFoundError); isNoBackupsErr {
+		// Having zero backups is not an error that should be handled in most cases.
+		if !json {
+			tracelog.InfoLogger.Println("No backups found")
+		}
+		return nil
+	}
+	return err
 }
 
 func (err NoBackupsFoundError) Error() string {
@@ -99,9 +111,6 @@ func GetBackups(folder storage.Folder) (backups []BackupTime, err error) {
 	}
 
 	backups = GetBackupTimeSlices(backupObjects)
-	if err != nil {
-		return nil, err
-	}
 
 	count := len(backups)
 	if count == 0 {

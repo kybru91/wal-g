@@ -8,11 +8,14 @@ import (
 	"strings"
 
 	"github.com/wal-g/wal-g/internal/databases/postgres"
+	"github.com/wal-g/wal-g/internal/multistorage"
 
 	"golang.org/x/sync/errgroup"
 
 	"github.com/wal-g/tracelog"
+
 	"github.com/wal-g/wal-g/internal"
+	conf "github.com/wal-g/wal-g/internal/config"
 	"github.com/wal-g/wal-g/pkg/storages/storage"
 	"github.com/wal-g/wal-g/utility"
 )
@@ -20,11 +23,12 @@ import (
 type DeleteArgs struct {
 	Confirmed bool
 	FindFull  bool
+	Force     bool
 }
 
 type DeleteHandler struct {
 	internal.DeleteHandler
-	permanentBackups map[string]bool
+	permanentBackups []string
 	args             DeleteArgs
 }
 
@@ -44,8 +48,12 @@ func NewDeleteHandler(folder storage.Folder, args DeleteArgs) (*DeleteHandler, e
 		return obj1.GetLastModified().Before(obj2.GetLastModified())
 	}
 
-	permanentBackups := internal.GetPermanentBackups(folder.GetSubFolder(utility.BaseBackupPath),
+	permanentBackups := internal.GetPermanentBackupsFromStorage(folder.GetSubFolder(utility.BaseBackupPath),
 		NewGenericMetaFetcher())
+	permanentBackupNames := make([]string, 0, len(permanentBackups))
+	for name := range permanentBackups {
+		permanentBackupNames = append(permanentBackupNames, name)
+	}
 	isPermanentFunc := func(obj storage.Object) bool {
 		return internal.IsPermanent(obj.GetName(), permanentBackups, BackupNameLength)
 	}
@@ -57,7 +65,7 @@ func NewDeleteHandler(folder storage.Folder, args DeleteArgs) (*DeleteHandler, e
 			gpLessFunc,
 			internal.IsPermanentFunc(isPermanentFunc),
 		),
-		permanentBackups: permanentBackups,
+		permanentBackups: permanentBackupNames,
 		args:             args,
 	}, nil
 }
@@ -149,7 +157,7 @@ func (h *DeleteHandler) HandleDeleteTarget(targetSelector internal.BackupSelecto
 }
 
 func (h *DeleteHandler) dispatchDeleteCmd(target internal.BackupObject, delType SegDeleteType) error {
-	backup, err := NewBackup(h.Folder, target.GetBackupName())
+	backup, err := NewBackupInStorage(h.Folder, target.GetBackupName(), multistorage.GetStorage(target))
 	if err != nil {
 		return err
 	}
@@ -158,35 +166,37 @@ func (h *DeleteHandler) dispatchDeleteCmd(target internal.BackupObject, delType 
 		return fmt.Errorf("failed to load backup %s sentinel: %v", backup.Name, err)
 	}
 
-	errorGroup, _ := errgroup.WithContext(context.Background())
-
-	deleteConcurrency, err := internal.GetMaxConcurrency(internal.GPDeleteConcurrency)
+	deleteConcurrency, err := conf.GetMaxConcurrency(conf.GPDeleteConcurrency)
 	if err != nil {
 		tracelog.WarningLogger.Printf("config error: %v", err)
 	}
 
-	deleteSem := make(chan struct{}, deleteConcurrency)
+	errorGroup, _ := errgroup.WithContext(context.Background())
+	errorGroup.SetLimit(deleteConcurrency)
 
 	// clean the segments
 	for i := range sentinel.Segments {
 		meta := sentinel.Segments[i]
-		tracelog.InfoLogger.Printf("Processing segment %d (backupId=%s)\n", meta.ContentID, meta.BackupID)
-
-		segHandler, err := NewSegDeleteHandler(h.Folder, meta.ContentID, h.args, delType)
-		if err != nil {
-			return err
-		}
-
-		segBackup, err := backup.GetSegmentBackup(meta.BackupID, meta.ContentID)
-		if err != nil {
-			return err
-		}
+		tracelog.InfoLogger.Printf("Processing segment %d (backupId=%s)", meta.ContentID, meta.BackupID)
 
 		errorGroup.Go(func() error {
-			deleteSem <- struct{}{}
+			segHandler, err := NewSegDeleteHandler(h.Folder, meta.ContentID, h.args, delType)
+			if err != nil {
+				return err
+			}
+			segBackup, err := backup.GetSegmentBackup(meta.BackupID, meta.ContentID)
+			if err != nil {
+				if h.args.Force {
+					tracelog.ErrorLogger.Printf("Processing segment %d (backupId=%s): %v", meta.ContentID, meta.BackupID, err)
+					return nil // skip non-critical errors in garbage deletion
+				}
+				return err
+			}
 			deleteErr := segHandler.Delete(segBackup)
-			<-deleteSem
-			return deleteErr
+			if deleteErr != nil {
+				return deleteErr
+			}
+			return nil
 		})
 	}
 

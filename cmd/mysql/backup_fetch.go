@@ -4,13 +4,17 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 	"github.com/wal-g/tracelog"
+
 	"github.com/wal-g/wal-g/internal"
+	conf "github.com/wal-g/wal-g/internal/config"
 	"github.com/wal-g/wal-g/internal/databases/mysql"
 )
 
 const (
 	backupFetchShortDescription = "Fetch desired backup from storage"
 	targetUserDataDescription   = "Fetch storage backup which has the specified user data"
+	useXbtoolExtractDescription = "Use internal xbtool to extract data from xbstream"
+	inplaceDescription          = "(DANGEROUS) Apply diff-s inplace (reduce required disk space)"
 )
 
 var (
@@ -19,31 +23,30 @@ var (
 		Use:   "backup-fetch backup-name",
 		Short: backupFetchShortDescription,
 		Args:  cobra.RangeArgs(0, 1),
-		PreRun: func(cmd *cobra.Command, args []string) {
-			internal.RequiredSettings[internal.NameStreamRestoreCmd] = true
-			err := internal.AssertRequiredSettingsSet()
-			tracelog.ErrorLogger.FatalOnError(err)
-		},
 		Run: func(cmd *cobra.Command, args []string) {
 			internal.ConfigureLimiters()
-			folder, err := internal.ConfigureFolder()
+			storage, err := internal.ConfigureStorage()
 			tracelog.ErrorLogger.FatalOnError(err)
-			restoreCmd, err := internal.GetCommandSetting(internal.NameStreamRestoreCmd)
-			tracelog.ErrorLogger.FatalOnError(err)
-			prepareCmd, _ := internal.GetCommandSetting(internal.MysqlBackupPrepareCmd)
+			restoreCmd, err := internal.GetCommandSetting(conf.NameStreamRestoreCmd)
+			if !useXbtoolExtract {
+				tracelog.ErrorLogger.FatalOnError(err)
+			}
+			prepareCmd, _ := internal.GetCommandSetting(conf.MysqlBackupPrepareCmd)
 
 			targetBackupSelector, err := createTargetBackupSelector(args, fetchTargetUserData)
 			tracelog.ErrorLogger.FatalOnError(err)
 
-			mysql.HandleBackupFetch(folder, targetBackupSelector, restoreCmd, prepareCmd)
+			mysql.HandleBackupFetch(storage.RootFolder(), targetBackupSelector, restoreCmd, prepareCmd, useXbtoolExtract, inplace)
 		},
 	}
 	fetchTargetUserData string
+	useXbtoolExtract    bool
+	inplace             bool
 )
 
 func createTargetBackupSelector(args []string, fetchTargetUserData string) (internal.BackupSelector, error) {
 	if fetchTargetUserData == "" {
-		fetchTargetUserData = viper.GetString(internal.FetchTargetUserDataSetting)
+		fetchTargetUserData = viper.GetString(conf.FetchTargetUserDataSetting)
 	}
 	fetchTargetBackupName := ""
 	if len(args) >= 1 {
@@ -54,6 +57,9 @@ func createTargetBackupSelector(args []string, fetchTargetUserData string) (inte
 
 func init() {
 	cmd.AddCommand(backupFetchCmd)
-	backupFetchCmd.Flags().StringVar(&fetchTargetUserData, "target-user-data",
-		"", targetUserDataDescription)
+	backupFetchCmd.Flags().StringVar(&fetchTargetUserData, "target-user-data", "", targetUserDataDescription)
+	backupFetchCmd.Flags().BoolVar(&useXbtoolExtract, "use-xbtool-extract", false, useXbtoolExtractDescription)
+	backupFetchCmd.Flags().BoolVar(&inplace, "inplace", false, inplaceDescription)
+	_ = backupFetchCmd.Flags().MarkHidden("use-xbtool-extract")
+	_ = backupFetchCmd.Flags().MarkHidden("inplace")
 }

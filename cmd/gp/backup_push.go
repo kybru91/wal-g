@@ -9,6 +9,8 @@ import (
 	"github.com/spf13/viper"
 	"github.com/wal-g/tracelog"
 	"github.com/wal-g/wal-g/internal"
+	conf "github.com/wal-g/wal-g/internal/config"
+	"github.com/wal-g/wal-g/internal/multistorage/policies"
 )
 
 const (
@@ -34,13 +36,13 @@ var (
 			internal.ConfigureLimiters()
 
 			if deltaFromName == "" {
-				deltaFromName = viper.GetString(internal.DeltaFromNameSetting)
+				deltaFromName = viper.GetString(conf.DeltaFromNameSetting)
 			}
 			if deltaFromUserData == "" {
-				deltaFromUserData = viper.GetString(internal.DeltaFromUserDataSetting)
+				deltaFromUserData = viper.GetString(conf.DeltaFromUserDataSetting)
 			}
 			if userDataRaw == "" {
-				userDataRaw = viper.GetString(internal.SentinelUserDataSetting)
+				userDataRaw = viper.GetString(conf.SentinelUserDataSetting)
 			}
 			userData, err := internal.UnmarshalSentinelUserData(userDataRaw)
 			tracelog.ErrorLogger.FatalfOnError("Failed to unmarshal the provided UserData: %s", err)
@@ -49,14 +51,20 @@ var (
 				deltaFromName, deltaFromUserData, greenplum.NewGenericMetaFetcher())
 			tracelog.ErrorLogger.FatalfOnError("Failed to find the base for a delta backup: %s", err)
 
-			logsDir := viper.GetString(internal.GPLogsDirectory)
+			logsDir := viper.GetString(conf.GPLogsDirectory)
 
-			segPollInterval, err := internal.GetDurationSetting(internal.GPSegmentsPollInterval)
+			segPollInterval, err := conf.GetDurationSetting(conf.GPSegmentsPollInterval)
 			tracelog.ErrorLogger.FatalOnError(err)
 
-			segPollRetries := viper.GetInt(internal.GPSegmentsPollRetries)
+			segPollRetries := viper.GetInt(conf.GPSegmentsPollRetries)
 
-			arguments := greenplum.NewBackupArguments(permanent, fullBackup, userData, prepareSegmentFwdArgs(), logsDir,
+			rootFolder, err := getMultistorageRootFolder(true, policies.TakeFirstStorage)
+			tracelog.ErrorLogger.FatalOnError(err)
+
+			uploader, err := internal.ConfigureUploaderToFolder(rootFolder)
+			tracelog.ErrorLogger.FatalOnError(err)
+
+			arguments := greenplum.NewBackupArguments(uploader, permanent, fullBackup, userData, prepareSegmentFwdArgs(), logsDir,
 				segPollInterval, segPollRetries, deltaBaseSelector)
 			backupHandler, err := greenplum.NewBackupHandler(arguments)
 			tracelog.ErrorLogger.FatalOnError(err)

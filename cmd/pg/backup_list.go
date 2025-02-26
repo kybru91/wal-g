@@ -6,7 +6,6 @@ import (
 	"github.com/wal-g/wal-g/internal"
 	"github.com/wal-g/wal-g/internal/databases/postgres"
 	"github.com/wal-g/wal-g/internal/multistorage"
-	"github.com/wal-g/wal-g/internal/multistorage/cache"
 	"github.com/wal-g/wal-g/internal/multistorage/policies"
 	"github.com/wal-g/wal-g/utility"
 )
@@ -25,25 +24,19 @@ var (
 		Short: backupListShortDescription,
 		Args:  cobra.NoArgs,
 		Run: func(cmd *cobra.Command, _ []string) {
-			primaryStorage, err := internal.ConfigureFolder()
+			storage, err := internal.ConfigureMultiStorage(false)
 			tracelog.ErrorLogger.FatalOnError(err)
 
-			failoverStorages, err := internal.InitFailoverStorages()
+			rootFolder := multistorage.SetPolicies(storage.RootFolder(), policies.UniteAllStorages)
+			if targetStorage == "" {
+				rootFolder, err = multistorage.UseAllAliveStorages(rootFolder)
+			} else {
+				rootFolder, err = multistorage.UseSpecificStorage(targetStorage, rootFolder)
+			}
 			tracelog.ErrorLogger.FatalOnError(err)
+			tracelog.InfoLogger.Printf("List backups from storages: %v", multistorage.UsedStorages(rootFolder))
 
-			cacheLifetime, err := internal.GetDurationSetting(internal.PgFailoverStorageCacheLifetime)
-			tracelog.ErrorLogger.FatalOnError(err)
-			aliveCheckTimeout, err := internal.GetDurationSetting(internal.PgFailoverStoragesCheckTimeout)
-			tracelog.ErrorLogger.FatalOnError(err)
-			cache, err := cache.NewStatusCache(primaryStorage, failoverStorages, cacheLifetime, aliveCheckTimeout)
-			tracelog.ErrorLogger.FatalOnError(err)
-
-			folder := multistorage.NewFolder(cache)
-			folder = multistorage.SetPolicies(folder, policies.UniteAllStorages)
-			folder, err = multistorage.UseAllAliveStorages(folder)
-			tracelog.ErrorLogger.FatalOnError(err)
-
-			backupsFolder := folder.GetSubFolder(utility.BaseBackupPath)
+			backupsFolder := rootFolder.GetSubFolder(utility.BaseBackupPath)
 			if detail {
 				postgres.HandleDetailedBackupList(backupsFolder, pretty, json)
 			} else {
@@ -67,4 +60,6 @@ func init() {
 		"Prints output in JSON format, multiline and indented if combined with --pretty flag")
 	backupListCmd.Flags().BoolVar(&detail, DetailFlag, false,
 		"Prints extra DB-specific backup details")
+	backupListCmd.Flags().StringVar(&targetStorage, "target-storage", "",
+		targetStorageDescription)
 }

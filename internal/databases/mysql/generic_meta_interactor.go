@@ -44,9 +44,16 @@ func (mf GenericMetaFetcher) Fetch(backupName string, backupFolder storage.Folde
 		StartTime:        sentinel.StartLocalTime,
 		FinishTime:       sentinel.StopLocalTime,
 		IsPermanent:      sentinel.IsPermanent,
-		IncrementDetails: &internal.NopIncrementDetailsFetcher{},
+		IncrementDetails: NewIncrementDetailsFetcher(&sentinel),
 		UserData:         sentinel.UserData,
 	}, nil
+}
+
+// TODO implement fetch from storage in mysql
+func (mf GenericMetaFetcher) FetchFromStorage(
+	backupName string, backupFolder storage.Folder, storage string,
+) (internal.GenericMetadata, error) {
+	return mf.Fetch(backupName, backupFolder)
 }
 
 type GenericMetaSetter struct{}
@@ -89,4 +96,24 @@ func modifyBackupSentinel(backupName string, backupFolder storage.Folder, modifi
 		return errors.Wrap(err, "failed to upload the modified metadata to the storage")
 	}
 	return nil
+}
+
+type IncrementDetailsFetcher struct {
+	sentinel *StreamSentinelDto
+}
+
+func NewIncrementDetailsFetcher(sentinel *StreamSentinelDto) *IncrementDetailsFetcher {
+	return &IncrementDetailsFetcher{sentinel}
+}
+
+func (idf *IncrementDetailsFetcher) Fetch() (bool, internal.IncrementDetails, error) {
+	if !idf.sentinel.IsIncremental {
+		return false, internal.IncrementDetails{}, nil
+	}
+
+	return true, internal.IncrementDetails{
+		IncrementFrom:     *idf.sentinel.IncrementFrom,
+		IncrementFullName: *idf.sentinel.IncrementFullName,
+		IncrementCount:    *idf.sentinel.IncrementCount,
+	}, nil
 }

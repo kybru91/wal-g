@@ -5,6 +5,7 @@ import (
 	"github.com/spf13/viper"
 	"github.com/wal-g/tracelog"
 	"github.com/wal-g/wal-g/internal"
+	conf "github.com/wal-g/wal-g/internal/config"
 	"github.com/wal-g/wal-g/internal/databases/mysql"
 	"github.com/wal-g/wal-g/utility"
 )
@@ -12,8 +13,10 @@ import (
 const (
 	backupPushShortDescription = "Creates new backup and pushes it to storage"
 	permanentFlag              = "permanent"
-	permanentShorthand         = "p"
+	countJournalsFlag          = "count-journals"
 	addUserDataFlag            = "add-user-data"
+
+	permanentShorthand = "p"
 )
 
 var (
@@ -22,8 +25,8 @@ var (
 		Use:   "backup-push",
 		Short: backupPushShortDescription,
 		PreRun: func(cmd *cobra.Command, args []string) {
-			internal.RequiredSettings[internal.NameStreamCreateCmd] = true
-			internal.RequiredSettings[internal.MysqlDatasourceNameSetting] = true
+			conf.RequiredSettings[conf.NameStreamCreateCmd] = true
+			conf.RequiredSettings[conf.MysqlDatasourceNameSetting] = true
 			err := internal.AssertRequiredSettingsSet()
 			tracelog.ErrorLogger.FatalOnError(err)
 		},
@@ -34,18 +37,28 @@ var (
 			tracelog.ErrorLogger.FatalOnError(err)
 			folder := uploader.Folder()
 			uploader.ChangeDirectory(utility.BaseBackupPath)
-			backupCmd, err := internal.GetCommandSetting(internal.NameStreamCreateCmd)
+			backupCmd, err := internal.GetCommandSetting(conf.NameStreamCreateCmd)
 			tracelog.ErrorLogger.FatalOnError(err)
 
 			if userData == "" {
-				userData = viper.GetString(internal.SentinelUserDataSetting)
+				userData = viper.GetString(conf.SentinelUserDataSetting)
 			}
 
-			mysql.HandleBackupPush(folder, uploader, backupCmd, permanent, userData)
+			mysql.HandleBackupPush(
+				folder,
+				uploader,
+				backupCmd,
+				permanent,
+				countJournals,
+				true,
+				userData,
+				mysql.NewNoDeltaBackupConfigurator(),
+			)
 		},
 	}
-	permanent = false
-	userData  = ""
+	permanent     = false
+	countJournals = false
+	userData      = ""
 )
 
 func init() {
@@ -57,4 +70,6 @@ func init() {
 		false, "Pushes permanent backup")
 	backupPushCmd.Flags().StringVar(&userData, addUserDataFlag,
 		"", "Write the provided user data to the backup sentinel and metadata files.")
+	backupPushCmd.Flags().BoolVar(&countJournals, countJournalsFlag,
+		false, "Create 'backups.json' file in the bucket and maintain the binlog sizes required to get from one backup to the next one")
 }

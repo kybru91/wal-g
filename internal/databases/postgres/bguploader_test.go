@@ -1,6 +1,7 @@
 package postgres_test
 
 import (
+	"context"
 	"fmt"
 	"math/rand"
 	"os"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/spf13/viper"
+	conf "github.com/wal-g/wal-g/internal/config"
 	"github.com/wal-g/wal-g/internal/databases/postgres"
 
 	"github.com/stretchr/testify/assert"
@@ -80,7 +82,7 @@ func TestBackgroundWALUpload(t *testing.T) {
 		},
 	}
 
-	viper.Set(internal.UploadWalMetadata, "NOMETADATA")
+	viper.Set(conf.UploadWalMetadata, "NOMETADATA")
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			defer testtools.Cleanup(t, internal.GetDataFolderPath())
@@ -97,8 +99,7 @@ func TestBackgroundWALUpload(t *testing.T) {
 			tu := testtools.NewMockWalUploader(false, false)
 			fakeASM := asm.NewFakeASM()
 			tu.ArchiveStatusManager = fakeASM
-
-			bu := postgres.NewBgUploader(a, int32(tt.maxParallelism), int32(tt.maxNumFilesUploaded), tu, false, false)
+			bu := postgres.NewBgUploader(context.Background(), a, int32(tt.maxParallelism), int32(tt.maxNumFilesUploaded), tu, false, false)
 			// Run BgUploader and wait 1 second before stopping
 			bu.Start()
 			// KLUDGE If maxParallelism=0, we expect to do no work. Therefore, do not wait.

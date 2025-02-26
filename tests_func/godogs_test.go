@@ -63,13 +63,13 @@ func TestMain(m *testing.M) {
 
 func RunTestFeatures() (status int, err error) {
 	if testOpts.debug {
-		err := tracelog.UpdateLogLevel(tracelog.DevelLogLevel)
+		err := tracelog.Setup(os.Stderr, tracelog.DevelLogLevel)
 		if err != nil {
 			return -1, err
 		}
 	}
 
-	tctx, err := CreateTestContex(testOpts.database)
+	tctx, err := CreateTestContext(testOpts.database)
 	if err != nil {
 		return -1, err
 	}
@@ -80,8 +80,8 @@ func RunTestFeatures() (status int, err error) {
 			return -1, err
 		}
 
-		tracelog.InfoLogger.Printf("Starting testing environment: mongodb %s with features: %v",
-			tctx.Version.Full, godogOpts.Paths)
+		tracelog.InfoLogger.Printf("Starting testing environment: %s %s with features: %v",
+			testOpts.database, tctx.Version.Full, godogOpts.Paths)
 
 		suite := godog.TestSuite{
 			Name: "godogs",

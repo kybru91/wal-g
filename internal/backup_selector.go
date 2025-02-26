@@ -30,7 +30,6 @@ func NewLatestBackupSelector() LatestBackupSelector {
 	return LatestBackupSelector{}
 }
 
-// TODO: unit tests
 func (s LatestBackupSelector) Select(folder storage.Folder) (Backup, error) {
 	return GetLatestBackup(folder.GetSubFolder(utility.BaseBackupPath))
 }
@@ -52,7 +51,6 @@ func NewUserDataBackupSelector(userDataRaw string, metaFetcher GenericMetaFetche
 	}, nil
 }
 
-// TODO: unit tests
 func (s UserDataBackupSelector) Select(folder storage.Folder) (Backup, error) {
 	return s.findBackupByUserData(s.userData, folder)
 }
@@ -74,9 +72,9 @@ func (s UserDataBackupSelector) findBackupByUserData(userData interface{}, folde
 	var foundBackupName string
 	var foundStorage string
 	uniqueNames := map[string]bool{}
-	for storageName := range foundMetas {
-		foundBackupName = foundMetas[storageName].BackupName
-		foundStorage = storageName
+	for i := range foundMetas {
+		foundBackupName = foundMetas[i].BackupName
+		foundStorage = foundMetas[i].StorageName
 		uniqueNames[foundBackupName] = true
 	}
 
@@ -93,19 +91,24 @@ func (s UserDataBackupSelector) findBackupByUserData(userData interface{}, folde
 	return NewBackupInStorage(baseBackupFolder, foundBackupName, foundStorage)
 }
 
+type GenericMetadataInStorage struct {
+	GenericMetadata
+	StorageName string
+}
+
 // Search backups in storage using specified criteria
 func searchInMetadata(
 	criteria func(GenericMetadata) bool,
 	folder storage.Folder,
 	metaFetcher GenericMetaFetcher,
-) (metaByStorage map[string]GenericMetadata, err error) {
+) ([]GenericMetadataInStorage, error) {
 	sentinels, err := GetBackupSentinelObjects(folder)
 	if err != nil {
 		return nil, err
 	}
 
 	backupTimes := GetBackupTimeSlices(sentinels)
-	foundMeta := make(map[string]GenericMetadata, 0)
+	foundMeta := make([]GenericMetadataInStorage, 0)
 
 	for _, backupTime := range backupTimes {
 		specificFolder, err := multistorage.UseSpecificStorage(backupTime.StorageName, folder)
@@ -121,7 +124,10 @@ func searchInMetadata(
 			continue
 		}
 		if criteria(meta) {
-			foundMeta[backupTime.StorageName] = meta
+			foundMeta = append(foundMeta, GenericMetadataInStorage{
+				GenericMetadata: meta,
+				StorageName:     backupTime.StorageName,
+			})
 		}
 	}
 	return foundMeta, nil
@@ -137,7 +143,6 @@ func NewBackupNameSelector(backupName string, checkExistence bool) (BackupNameSe
 	return BackupNameSelector{backupName: backupName, checkExistence: checkExistence}, nil
 }
 
-// TODO: unit tests
 func (s BackupNameSelector) Select(folder storage.Folder) (Backup, error) {
 	if !s.checkExistence {
 		return NewBackupInStorage(folder, s.backupName, consts.DefaultStorage)
@@ -200,7 +205,6 @@ func NewOldestNonPermanentSelector(metaFetcher GenericMetaFetcher) *OldestNonPer
 	return &OldestNonPermanentSelector{metaFetcher: metaFetcher}
 }
 
-// TODO: unit tests
 func (s *OldestNonPermanentSelector) Select(folder storage.Folder) (Backup, error) {
 	searchFn := func(d GenericMetadata) bool {
 		if !d.IsPermanent {
@@ -222,14 +226,12 @@ func (s *OldestNonPermanentSelector) Select(folder storage.Folder) (Backup, erro
 		return Backup{}, NewNoBackupsFoundError()
 	}
 
-	var oldestMeta GenericMetadata
-	var oldestStorage string
-	for storageName := range foundMetas {
-		if foundMetas[storageName].StartTime.Before(oldestMeta.StartTime) {
-			oldestMeta = foundMetas[storageName]
-			oldestStorage = storageName
+	oldestMeta := foundMetas[0]
+	for i := range foundMetas {
+		if foundMetas[i].StartTime.Before(oldestMeta.StartTime) {
+			oldestMeta = foundMetas[i]
 		}
 	}
 
-	return NewBackupInStorage(folder, oldestMeta.BackupName, oldestStorage)
+	return NewBackupInStorage(folder, oldestMeta.BackupName, oldestMeta.StorageName)
 }

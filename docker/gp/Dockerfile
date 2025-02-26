@@ -1,4 +1,4 @@
-FROM wal-g/ubuntu:latest
+FROM wal-g/ubuntu:18.04
 
 RUN apt-get update && \
     apt-get install --yes --no-install-recommends --no-install-suggests locales iputils-ping ssh python-dev iproute2 less sudo \
@@ -13,7 +13,7 @@ RUN apt-get update && \
 ADD docker/gp/run_greenplum.sh /home/gpadmin/run_greenplum.sh
 
 WORKDIR /usr/local
-RUN git clone https://github.com/greenplum-db/gpdb.git gpdb_src && cd gpdb_src && git checkout 6X_STABLE && cd .. \
+RUN git clone https://github.com/yezzey-gp/ygp.git gpdb_src --single-branch --branch 6X_STABLE --depth 1 \
  && ./gpdb_src/concourse/scripts/setup_gpadmin_user.bash
 
 WORKDIR /usr/local/gpdb_src
@@ -21,10 +21,10 @@ RUN locale-gen en_US.utf8 \
  && sed -i 's/apt-get install/DEBIAN_FRONTEND=noninteractive apt-get install/g' README.ubuntu.bash \
  && ./README.ubuntu.bash \
  && wget -c https://archive.apache.org/dist/xerces/c/3/sources/xerces-c-3.1.1.tar.gz -O - | tar -xz \
- && cd xerces-c-3.1.1 && ./configure && make -j8 > /dev/null && make -j8 install && cd .. \
+ && cd xerces-c-3.1.1 && ./configure && make -j$(nproc) > /dev/null && make -j$(nproc) install && cd .. \
  && ./configure --with-perl --with-python --with-libxml --with-gssapi --prefix=/usr/local/gpdb_src > /dev/null \
- && make -j8 > /dev/null \
- && make -j8 install > /dev/null \
+ && make -j$(nproc) > /dev/null \
+ && make -j$(nproc) install > /dev/null \
  && chown gpadmin:gpadmin /home/gpadmin/run_greenplum.sh \
  && chmod a+x /home/gpadmin/run_greenplum.sh \
  && echo "export MASTER_DATA_DIRECTORY=/usr/local/gpdb_src/gpAux/gpdemo/datadirs/qddir/demoDataDir-1" > /home/gpadmin/.bash_profile \

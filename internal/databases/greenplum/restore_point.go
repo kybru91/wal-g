@@ -8,14 +8,16 @@ import (
 	"strings"
 	"time"
 
+	"github.com/wal-g/wal-g/internal/multistorage"
 	"github.com/wal-g/wal-g/pkg/storages/storage"
 
 	"github.com/spf13/viper"
 
-	"github.com/blang/semver"
-	"github.com/jackc/pgx"
+	"github.com/jackc/pgx/v5"
 	"github.com/wal-g/tracelog"
+
 	"github.com/wal-g/wal-g/internal"
+	conf "github.com/wal-g/wal-g/internal/config"
 	"github.com/wal-g/wal-g/internal/databases/postgres"
 	"github.com/wal-g/wal-g/utility"
 )
@@ -28,8 +30,10 @@ type RestorePointMetadata struct {
 	FinishTime       time.Time      `json:"finish_time"`
 	Hostname         string         `json:"hostname"`
 	GpVersion        string         `json:"gp_version"`
+	GpFlavor         string         `json:"gp_flavor"`
 	SystemIdentifier *uint64        `json:"system_identifier"`
 	LsnBySegment     map[int]string `json:"lsn_by_segment"`
+	StorageName      string         `json:"storage_name"`
 }
 
 func (s *RestorePointMetadata) String() string {
@@ -56,8 +60,8 @@ func FetchRestorePointMetadata(folder storage.Folder, pointName string) (Restore
 }
 
 // ValidateMatch checks that restore point is reachable from the provided backup
-func ValidateMatch(folder storage.Folder, backupName string, restorePoint string) error {
-	backup, err := NewBackup(folder, backupName)
+func ValidateMatch(folder storage.Folder, backupName, restorePoint, storage string) error {
+	backup, err := NewBackupInStorage(folder, backupName, storage)
 	if err != nil {
 		return err
 	}
@@ -85,7 +89,7 @@ type RestorePointCreator struct {
 	pointName        string
 	startTime        time.Time
 	systemIdentifier *uint64
-	gpVersion        semver.Version
+	gpVersion        Version
 
 	Uploader internal.Uploader
 	Conn     *pgx.Conn
@@ -116,7 +120,7 @@ func NewRestorePointCreator(pointName string) (rpc *RestorePointCreator, err err
 		Conn:             conn,
 		systemIdentifier: systemIdentifier,
 		gpVersion:        version,
-		logsDir:          viper.GetString(internal.GPLogsDirectory),
+		logsDir:          viper.GetString(conf.GPLogsDirectory),
 	}
 	rpc.Uploader.ChangeDirectory(utility.BaseBackupPath)
 
@@ -177,7 +181,8 @@ func (rpc *RestorePointCreator) uploadMetadata(restoreLSNs map[int]string) (err 
 		StartTime:        rpc.startTime,
 		FinishTime:       utility.TimeNowCrossPlatformUTC(),
 		Hostname:         hostname,
-		GpVersion:        rpc.gpVersion.String(),
+		GpVersion:        rpc.gpVersion.Version.String(),
+		GpFlavor:         rpc.gpVersion.Flavor.String(),
 		SystemIdentifier: rpc.systemIdentifier,
 		LsnBySegment:     restoreLSNs,
 	}
@@ -190,8 +195,9 @@ func (rpc *RestorePointCreator) uploadMetadata(restoreLSNs map[int]string) (err 
 }
 
 type RestorePointTime struct {
-	Name string    `json:"restore_point_name"`
-	Time time.Time `json:"time"`
+	Name        string    `json:"restore_point_name"`
+	Time        time.Time `json:"time"`
+	StorageName string    `json:"storage_name"`
 }
 
 type NoRestorePointsFoundError struct {
@@ -202,27 +208,32 @@ func NewNoRestorePointsFoundError() NoRestorePointsFoundError {
 	return NoRestorePointsFoundError{fmt.Errorf("no restore points found")}
 }
 
-// FindRestorePointBeforeTS finds restore point that was created before the provided timestamp
-// and finish time closest to the provided timestamp
-func FindRestorePointBeforeTS(timestampStr string, folder storage.Folder) (string, error) {
-	ts, err := time.Parse(time.RFC3339, timestampStr)
-	if err != nil {
-		return "", fmt.Errorf("timestamp parse error: %v", err)
-	}
+func FetchAllRestorePoints(folder storage.Folder) ([]RestorePointMetadata, error) {
+	restorePointMetas := make([]RestorePointMetadata, 0)
 
 	restorePointTimes, err := GetRestorePoints(folder.GetSubFolder(utility.BaseBackupPath))
 	if err != nil {
-		return "", err
+		return restorePointMetas, err
 	}
 
-	restorePointMetas := make([]RestorePointMetadata, 0)
 	for _, rp := range restorePointTimes {
 		meta, err := FetchRestorePointMetadata(folder, rp.Name)
 		if err != nil {
-			return "", fmt.Errorf("fetch restore point %s metadata: %v", rp.Name, err)
+			return restorePointMetas, fmt.Errorf("fetch restore point %s metadata: %v", rp.Name, err)
 		}
 
 		restorePointMetas = append(restorePointMetas, meta)
+	}
+
+	return restorePointMetas, nil
+}
+
+// FindRestorePointBeforeTS finds restore point that was created before the provided timestamp
+// and finish time closest to the provided timestamp
+func FindRestorePointBeforeTS(timestampStr string, restorePointMetas []RestorePointMetadata) (string, error) {
+	ts, err := time.Parse(time.RFC3339, timestampStr)
+	if err != nil {
+		return "", fmt.Errorf("timestamp parse error: %v", err)
 	}
 
 	var targetPoint *RestorePointMetadata
@@ -248,6 +259,38 @@ func FindRestorePointBeforeTS(timestampStr string, folder storage.Folder) (strin
 	return targetPoint.Name, nil
 }
 
+// Finds restore point that contains timestamp
+func FindRestorePointWithTS(timestampStr string, restorePointMetas []RestorePointMetadata) (string, error) {
+	ts, err := time.Parse(time.RFC3339, timestampStr)
+	if err != nil {
+		return "", fmt.Errorf("timestamp parse error: %v", err)
+	}
+	// add second because we round down when formatting
+	ts = ts.Add(time.Second)
+
+	var targetPoint *RestorePointMetadata
+	for i := range restorePointMetas {
+		meta := restorePointMetas[i]
+		// target restore point should be finished after or right at the provided ts
+		if meta.FinishTime.Before(ts) {
+			continue
+		}
+
+		// we choose the restore point closest to the provided time
+		if targetPoint == nil || meta.FinishTime.Before(targetPoint.FinishTime) {
+			targetPoint = &meta
+		}
+	}
+
+	if targetPoint == nil {
+		return "", NewNoRestorePointsFoundError()
+	}
+
+	tracelog.InfoLogger.Printf("Found restore point %s with start time %s, closest to the provided time %s",
+		targetPoint.Name, targetPoint.StartTime, ts)
+	return targetPoint.Name, nil
+}
+
 // GetRestorePoints receives restore points descriptions and sorts them by time
 func GetRestorePoints(folder storage.Folder) (restorePoints []RestorePointTime, err error) {
 	restorePointsObjects, _, err := folder.ListFolder()
@@ -256,9 +299,6 @@ func GetRestorePoints(folder storage.Folder) (restorePoints []RestorePointTime, 
 	}
 
 	restorePoints = GetRestorePointsTimeSlices(restorePointsObjects)
-	if err != nil {
-		return nil, err
-	}
 
 	count := len(restorePoints)
 	if count == 0 {
@@ -274,8 +314,10 @@ func GetRestorePointsTimeSlices(restorePoints []storage.Object) []RestorePointTi
 		if !strings.HasSuffix(key, RestorePointSuffix) {
 			continue
 		}
+		storageName := multistorage.GetStorage(object)
 		time := object.GetLastModified()
-		restorePointsTimes = append(restorePointsTimes, RestorePointTime{Name: StripRightmostRestorePointName(key), Time: time})
+		restorePointsTimes = append(restorePointsTimes,
+			RestorePointTime{Name: StripRightmostRestorePointName(key), Time: time, StorageName: storageName})
 	}
 
 	sort.Slice(restorePointsTimes, func(i, j int) bool {

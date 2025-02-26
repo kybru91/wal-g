@@ -15,9 +15,11 @@ import (
 	"github.com/wal-g/wal-g/internal/compression"
 
 	gomysql "github.com/go-mysql-org/go-mysql/mysql"
-	"github.com/go-sql-driver/mysql"
+	mysqldriver "github.com/go-sql-driver/mysql"
 	"github.com/wal-g/tracelog"
+
 	"github.com/wal-g/wal-g/internal"
+	conf "github.com/wal-g/wal-g/internal/config"
 	"github.com/wal-g/wal-g/pkg/storages/storage"
 	"github.com/wal-g/wal-g/utility"
 )
@@ -26,15 +28,47 @@ const BinlogPath = "binlog_" + utility.VersionStr + "/"
 
 const TimeMysqlFormat = "2006-01-02 15:04:05"
 
+type BackupTool string
+
+const (
+	WalgUnspecifiedStreamBackupTool BackupTool = "WALG_UNSPECIFIED_STREAM_BACKUP_TOOL"
+	WalgXtrabackupTool              BackupTool = "WALG_XTRABACKUP_TOOL"
+)
+
+func fetchMySQLVariable(db *sql.DB, variable string) (string, error) {
+	row := db.QueryRow("SELECT @@" + variable)
+	var value string
+	err := row.Scan(&value)
+	if err != nil {
+		return "", err
+	}
+	return value, nil
+}
+
+func getMySQLVersion(db *sql.DB) (string, error) {
+	// e.g. '8.0.35-27'
+	return fetchMySQLVariable(db, "version")
+}
+
+// nolint:unused
+func getMySQLArchitecture(db *sql.DB) (string, error) {
+	// e.g 'x86_64' / 'aarch64' / 'arm64'
+	return fetchMySQLVariable(db, "version_compile_machine")
+}
+
+// nolint:unused
+func getMySQLOS(db *sql.DB) (string, error) {
+	// e.g. 'Linux' / 'macos14.2'
+	return fetchMySQLVariable(db, "version_compile_os")
+}
+
 func getMySQLFlavor(db *sql.DB) (string, error) {
-	row := db.QueryRow("SELECT @@version")
-	var versionComment string
-	err := row.Scan(&versionComment)
+	version, err := getMySQLVersion(db)
 	if err != nil {
 		return "", err
 	}
 	// example: '10.6.4-MariaDB-1:10.6.4+maria~focal'
-	if strings.Contains(versionComment, "MariaDB") {
+	if strings.Contains(version, "MariaDB") {
 		return gomysql.MariaDBFlavor, nil
 	}
 	// It is possible to distinguish Percona & MySQL by checking 'version_comment',
@@ -61,6 +95,27 @@ func getMySQLGTIDExecuted(db *sql.DB, flavor string) (gomysql.GTIDSet, error) {
 	}
 
 	return gomysql.ParseGTIDSet(flavor, gtidStr)
+}
+
+func getServerUUID(db *sql.DB, flavor string) (string, error) {
+	query := ""
+	switch flavor {
+	case gomysql.MySQLFlavor:
+		query = "SELECT @@server_uuid"
+	case gomysql.MariaDBFlavor:
+		// MariaDB doesn't support `server_uuid`
+		return "", nil
+	default:
+		return "", fmt.Errorf("unknown MySQL flavor: %s", flavor)
+	}
+
+	row := db.QueryRow(query)
+	var uuid string
+	err := row.Scan(&uuid)
+	if err != nil {
+		return "", err
+	}
+	return uuid, nil
 }
 
 func getLastUploadedBinlog(folder storage.Folder) (string, error) {
@@ -108,7 +163,7 @@ func getLastUploadedBinlogBeforeGTID(folder storage.Folder, gtid gomysql.GTIDSet
 }
 
 func getMySQLConnection() (*sql.DB, error) {
-	datasourceName, err := internal.GetRequiredSetting(internal.MysqlDatasourceNameSetting)
+	datasourceName, err := conf.GetRequiredSetting(conf.MysqlDatasourceNameSetting)
 	if err != nil {
 		return nil, err
 	}
@@ -126,7 +181,7 @@ func getMySQLConnection() (*sql.DB, error) {
 }
 
 func getMySQLConnectionFromDatasource(datasourceName string) (*sql.DB, error) {
-	if caFile, ok := internal.GetSetting(internal.MysqlSslCaSetting); ok {
+	if caFile, ok := conf.GetSetting(conf.MysqlSslCaSetting); ok {
 		rootCertPool := x509.NewCertPool()
 		pem, err := os.ReadFile(caFile)
 		if err != nil {
@@ -135,7 +190,7 @@ func getMySQLConnectionFromDatasource(datasourceName string) (*sql.DB, error) {
 		if ok := rootCertPool.AppendCertsFromPEM(pem); !ok {
 			return nil, fmt.Errorf("failed to load certificate from %s", caFile)
 		}
-		err = mysql.RegisterTLSConfig("custom", &tls.Config{
+		err = mysqldriver.RegisterTLSConfig("custom", &tls.Config{
 			RootCAs: rootCertPool,
 		})
 		if err != nil {
@@ -144,13 +199,17 @@ func getMySQLConnectionFromDatasource(datasourceName string) (*sql.DB, error) {
 		if strings.Contains(datasourceName, "?tls=") || strings.Contains(datasourceName, "&tls=") {
 			return nil,
 				fmt.Errorf("mySQL datasource string contains tls option. It can't be used with %v option",
-					internal.MysqlSslCaSetting)
+					conf.MysqlSslCaSetting)
 		}
 		if strings.Contains(datasourceName, "?") {
 			datasourceName += "&tls=custom"
 		} else {
 			datasourceName += "?tls=custom"
 		}
+	}
+	_, err := mysqldriver.ParseDSN(datasourceName)
+	if err != nil {
+		return nil, err
 	}
 	db, err := sql.Open("mysql", datasourceName)
 	return db, err
@@ -176,7 +235,8 @@ func replaceHostInDatasourceName(datasourceName string, newHost string) string {
 }
 
 type StreamSentinelDto struct {
-	BinLogStart string `json:"BinLogStart,omitempty"`
+	Tool        BackupTool `json:"Tool,omitempty"`
+	BinLogStart string     `json:"BinLogStart,omitempty"`
 	// BinLogEnd field is for debug purpose only.
 	// As we can not guarantee that transactions in BinLogEnd file happened before or after backup
 	BinLogEnd      string    `json:"BinLogEnd,omitempty"`
@@ -186,10 +246,21 @@ type StreamSentinelDto struct {
 	UncompressedSize int64  `json:"UncompressedSize,omitempty"`
 	CompressedSize   int64  `json:"CompressedSize,omitempty"`
 	Hostname         string `json:"Hostname,omitempty"`
+	ServerUUID       string `json:"ServerUUID,omitempty"`
+	ServerVersion    string `json:"ServerVersion,omitempty"` // e.g. '8.0.35-27'
+	ServerArch       string `json:"ServerArch,omitempty"`    // e.g '386' / 'amd64' / 'arm64' / 'arm'
+	ServerOS         string `json:"ServerOS,omitempty"`      // e.g. 'linux' / 'darwin' / 'windows'
 
-	IsPermanent bool        `json:"IsPermanent,omitempty"`
-	UserData    interface{} `json:"UserData,omitempty"`
+	IsPermanent   bool `json:"IsPermanent"`
+	IsIncremental bool `json:"IsIncremental"`
 
+	UserData interface{} `json:"UserData,omitempty"`
+
+	LSN               *LSN    `json:"LSN"`
+	IncrementFromLSN  *LSN    `json:"DeltaLSN,omitempty"`
+	IncrementFrom     *string `json:"DeltaFrom,omitempty"`
+	IncrementFullName *string `json:"DeltaFullName,omitempty"`
+	IncrementCount    *int    `json:"DeltaCount,omitempty"`
 	//todo: add other fields from internal.GenericMetadata
 }
 

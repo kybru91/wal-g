@@ -76,6 +76,12 @@ func (u *AoStorageUploader) addFile(cfi *internal.ComposeFileInfo, aoMeta AoRelF
 		return u.regularAoUpload(cfi, aoMeta, location)
 	}
 
+	if !u.isIncremental && remoteFile.IsIncremented {
+		tracelog.DebugLogger.Printf("%s: backup isIncremental: %t, remote file isIncremented: %t, will perform a regular upload",
+			cfi.Header.Name, u.isIncremental, remoteFile.IsIncremented)
+		return u.regularAoUpload(cfi, aoMeta, location)
+	}
+
 	if aoMeta.modCount != remoteFile.ModCount {
 		if !u.isIncremental || aoMeta.modCount == 0 {
 			tracelog.DebugLogger.Printf("%s: isIncremental: %t, modCount: %d, will perform a regular upload",
@@ -114,7 +120,7 @@ func (u *AoStorageUploader) addFile(cfi *internal.ComposeFileInfo, aoMeta AoRelF
 	tracelog.DebugLogger.Printf(
 		"%s: ModCount %d, EOF %d matches the remote file %s, will skip this file",
 		cfi.Header.Name, remoteFile.ModCount, remoteFile.EOF, remoteFile.StoragePath)
-	return u.skipAoUpload(cfi, aoMeta, remoteFile.StoragePath, remoteFile.InitialUploadTS)
+	return u.skipAoUpload(cfi, aoMeta, remoteFile.StoragePath, remoteFile.InitialUploadTS, remoteFile.IsIncremented)
 }
 
 func (u *AoStorageUploader) addAoFileMetadata(
@@ -131,8 +137,8 @@ func (u *AoStorageUploader) GetFiles() *AOFilesMetadataDTO {
 }
 
 func (u *AoStorageUploader) skipAoUpload(cfi *internal.ComposeFileInfo, aoMeta AoRelFileMetadata, storageKey string,
-	initialUploadTS time.Time) error {
-	u.addAoFileMetadata(cfi, storageKey, aoMeta, true, false, initialUploadTS)
+	initialUploadTS time.Time, isIncremented bool) error {
+	u.addAoFileMetadata(cfi, storageKey, aoMeta, true, isIncremented, initialUploadTS)
 	u.bundleFiles.AddSkippedFile(cfi.Header, cfi.FileInfo)
 	tracelog.DebugLogger.Printf("Skipping %s AO relfile (already exists in storage as %s)", cfi.Path, storageKey)
 	return nil

@@ -24,7 +24,6 @@ func NewGenericMetaFetcher() GenericMetaFetcher {
 	return GenericMetaFetcher{}
 }
 
-// TODO: Unit tests
 func (mf GenericMetaFetcher) Fetch(backupName string, backupFolder storage.Folder) (internal.GenericMetadata, error) {
 	backup, err := NewBackup(backupFolder, backupName)
 	if err != nil {
@@ -48,13 +47,19 @@ func (mf GenericMetaFetcher) Fetch(backupName string, backupFolder storage.Folde
 	}, nil
 }
 
+// TODO rewrite multistorage pg operations with this method and internal.GetPermanentBackups instead of postgres.GetPermanentBackupsAndWals
+func (mf GenericMetaFetcher) FetchFromStorage(
+	backupName string, backupFolder storage.Folder, storage string,
+) (internal.GenericMetadata, error) {
+	return mf.Fetch(backupName, backupFolder)
+}
+
 type GenericMetaSetter struct{}
 
 func NewGenericMetaSetter() GenericMetaSetter {
 	return GenericMetaSetter{}
 }
 
-// TODO: Unit tests
 func (ms GenericMetaSetter) SetUserData(backupName string, backupFolder storage.Folder, userData interface{}) error {
 	modifier := func(dto ExtendedMetadataDto) ExtendedMetadataDto {
 		dto.UserData = userData
@@ -63,7 +68,6 @@ func (ms GenericMetaSetter) SetUserData(backupName string, backupFolder storage.
 	return modifyBackupMetadata(backupName, backupFolder, modifier)
 }
 
-// TODO: Unit tests
 func (ms GenericMetaSetter) SetIsPermanent(backupName string, backupFolder storage.Folder, isPermanent bool) error {
 	modifier := func(dto ExtendedMetadataDto) ExtendedMetadataDto {
 		dto.IsPermanent = isPermanent

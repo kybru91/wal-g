@@ -19,6 +19,10 @@ Concurrency values can be configured using:
 
 To configure how many goroutines to use during ```backup-fetch``` and ```wal-fetch```, use `WALG_DOWNLOAD_CONCURRENCY`. By default, WAL-G uses the minimum of the number of files to extract and 10.
 
+* `WALG_DOWNLOAD_FILE_RETRIES`
+
+To configure how many times failed file will be retried during ```backup-fetch``` and ```wal-fetch```, use `WALG_DOWNLOAD_FILE_RETRIES`. By default is set to 15.
+
 * `WALG_PREFETCH_DIR`
 
 By default WAL prefetch is storing prefetched data in pg_wal directory. This ensures that WAL can be easily moved from prefetch location to actual WAL consumption directory. But it may have negative consequences if you use it with pg_rewind in PostgreSQL 13.
@@ -46,7 +50,7 @@ If this setting is specified, during ```wal-push``` WAL-G will check the existen
 
 * `WALG_DELTA_MAX_STEPS`
 
-Delta-backup is the difference between previously taken backup and present state. `WALG_DELTA_MAX_STEPS` determines how many delta backups can be between full backups. Defaults to 0.
+Delta-backup is the difference between previously taken backup and present state. `WALG_DELTA_MAX_STEPS` determines how many delta backups can be between full backups. Defaults to 0 (disabled).
 Restoration process will automatically fetch all necessary deltas and base backup and compose valid restored backup (you still need WALs after start of last backup to restore consistent cluster).
 Delta computation is based on ModTime of file system and LSN number of pages in datafiles.
 
@@ -527,6 +531,17 @@ wal-g catchup-fetch /path/to/replica/postgres backup_name
 ```
 
 
+### ``catchup-send`` and ``catchup-recieve``
+
+These commands are used in conjunction to catchup lagging replica. On a standby you should run ``catchup-recieve``, then on a primary ``catchup-send``. Standby Postgres must be stopped during this procedure.
+
+``` bash
+wal-g catchup-receive ${PGDATA_STANDBY} 1337 &
+
+wal-g catchup-send ${PGDATA_PRIMARY} hostname:1337
+```
+
+
 ### ``copy``
 
 This command will help to change the storage and move the set of backups there or write the backups on magnetic tape. For example, `wal-g copy --from=config_from.json --to=config_to.json` will copy all backups.
@@ -536,7 +551,7 @@ Flags:
 - `-b, --backup-name string` Copy specific backup
 - `-f, --from string` Storage config from where should copy backup
 - `-t, --to string` Storage config to where should copy backup
-- `-w, --without-history` Copy backup without history (wal files)
+- `-w, --with-history` If set - copy WALs older than backup finish_lsn. If not - copy only WALs from start_lsn to finish_lsn
 
 ### ``delete garbage``
 
@@ -613,35 +628,7 @@ Usage:
 wal-g pgbackrest wal-show
 ```
 
-Failover archive storages (experimental)
------------
-
-Switch to a failover storage for `wal-push` if primary storage becomes unavailable. This might be useful when the archiving fails during the cloud storage service unavailability to avoid out-of-disk-space issues.
-WAL-G will also take the failover storages into account during the `wal-fetch` / `wal-prefetch`.
-
-```bash
-WALG_FAILOVER_STORAGES:
-    TEST_STORAGE:
-        AWS_SECRET_ACCESS_KEY: "S3_STORAGE_KEY_1"
-        AWS_ACCESS_KEY_ID: "S3_STORAGE_KEY_ID_1"
-        WALE_S3_PREFIX: "s3://some-s3-storage-1/"
-    STORAGE2:
-        AWS_SECRET_ACCESS_KEY: "S3_STORAGE_KEY_2"
-        AWS_ACCESS_KEY_ID: "S3_STORAGE_KEY_ID_2"
-        WALE_S3_PREFIX: "s3://some-s3-storage-2/"
-    FILE_STORAGE:
-        WALG_FILE_PREFIX: "/some/prefix"
-```
-
-Please note that to use this feature WAL-G must be configured using a config file as it is impossible to put this nested structure to an environment variable.
-
-* `WALG_FAILOVER_STORAGES_CHECK_TIMEOUT`
-
-WAL-G will use no more than seconds to check for available alive storages. Default value is `30s`.
-
-* `WALG_FAILOVER_STORAGES_CACHE_LIFETIME`
-
-WAL-G saves information about last used alive storage to disk to avoid excessive storage calls. This setting controls lifetime of this cache. Default value is `15m`.
+[Information about failover storages configuration](FailoverStorages.md)
 
 Playground
 -----------
